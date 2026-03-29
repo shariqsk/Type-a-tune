@@ -17,6 +17,7 @@ type AnalysisResult = {
 
 type PlaybackMode = "slices" | "piano";
 type TypingFeel = "slow" | "normal" | "high";
+type MistakeMode = "off" | "normal" | "strict";
 
 type PianoVoice = {
   gain: GainNode;
@@ -37,6 +38,14 @@ type PerformanceClock = {
 const MIN_BPM = 70;
 const MAX_BPM = 170;
 const TYPING_FEELS: TypingFeel[] = ["slow", "normal", "high"];
+const MISTAKE_MODES: MistakeMode[] = ["off", "normal", "strict"];
+const PROMPT_PHRASES = [
+  "moonlight on the keys",
+  "type the melody alive",
+  "soft chords under your hands",
+  "piano sparks in motion",
+  "let the rhythm breathe",
+];
 
 const normalizeBpm = (value: number) => {
   let bpm = value;
@@ -302,6 +311,20 @@ const getTypingFeelProfile = (typingFeel: TypingFeel) => {
   }
 };
 
+const getTypedCharacter = (event: KeyboardEvent) => {
+  if (event.key === "Enter" || event.key === " ") {
+    return " ";
+  }
+
+  return event.key.length === 1 ? event.key.toLowerCase() : "";
+};
+
+const buildPromptStream = (startIndex: number, phraseCount: number) => {
+  return Array.from({ length: phraseCount }, (_, index) => {
+    return PROMPT_PHRASES[(startIndex + index) % PROMPT_PHRASES.length];
+  }).join("   ");
+};
+
 const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
   const sampleRate = audioBuffer.sampleRate;
   const channelCount = audioBuffer.numberOfChannels;
@@ -421,6 +444,13 @@ function App() {
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("piano");
   const [isPaceLocked, setIsPaceLocked] = useState(false);
   const [typingFeel, setTypingFeel] = useState<TypingFeel>("normal");
+  const [mistakeMode, setMistakeMode] = useState<MistakeMode>("normal");
+  const [isGameActive, setIsGameActive] = useState(false);
+  const [promptStream, setPromptStream] = useState(() => buildPromptStream(0, 14));
+  const [nextPromptSeedIndex, setNextPromptSeedIndex] = useState(
+    14 % PROMPT_PHRASES.length,
+  );
+  const [promptCursor, setPromptCursor] = useState(0);
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
@@ -428,6 +458,7 @@ function App() {
     "Load a song and start typing to step through detected beats.",
   );
   const typingFeelProfile = getTypingFeelProfile(typingFeel);
+  const activePrompt = promptStream;
 
   const handleDragState = (isActive: boolean) => {
     setIsDragActive(isActive);
@@ -442,6 +473,13 @@ function App() {
 
   const handleUploadError = (message: string) => {
     setUploadError(message);
+  };
+
+  const resetPromptGame = () => {
+    setPromptStream(buildPromptStream(0, 14));
+    setNextPromptSeedIndex(14 % PROMPT_PHRASES.length);
+    setPromptCursor(0);
+    setIsGameActive(false);
   };
 
   const ensureAudioContext = async () => {
@@ -748,6 +786,89 @@ function App() {
     };
 
     return formatMidiNote(tone.midi);
+  };
+
+  const playMistakeCue = async (
+    audioContext: AudioContext,
+    audioBuffer: AudioBuffer | null,
+    referenceTime: number | null,
+  ) => {
+    const outputNode = ensureOutputChain(audioContext);
+    const now = audioContext.currentTime;
+    const referenceTone =
+      audioBuffer && referenceTime !== null
+        ? analyzeStepTone(audioBuffer, referenceTime).midi
+        : 60;
+    const midis = [
+      clampMidi(referenceTone - 1),
+      clampMidi(referenceTone + 1),
+      clampMidi(referenceTone + 6),
+    ];
+    const masterGain = audioContext.createGain();
+    const filter = audioContext.createBiquadFilter();
+    const oscillators: OscillatorNode[] = [];
+    const gains: GainNode[] = [];
+
+    masterGain.gain.setValueAtTime(0.0001, now);
+    masterGain.gain.linearRampToValueAtTime(0.16, now + 0.01);
+    masterGain.gain.exponentialRampToValueAtTime(0.08, now + 0.12);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.38);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(1800, now);
+    filter.Q.value = 0.6;
+
+    midis.forEach((midi, index) => {
+      const fundamental = audioContext.createOscillator();
+      const overtone = audioContext.createOscillator();
+      const noteGain = audioContext.createGain();
+      const frequency = midiToFrequency(midi);
+      const startOffset = index * 0.012;
+
+      fundamental.type = "triangle";
+      overtone.type = "sine";
+      fundamental.frequency.setValueAtTime(frequency, now + startOffset);
+      overtone.frequency.setValueAtTime(frequency * 2.02, now + startOffset);
+      noteGain.gain.value = [0.4, 0.28, 0.18][index] ?? 0.16;
+
+      fundamental.connect(noteGain);
+      overtone.connect(noteGain);
+      noteGain.connect(filter);
+
+      oscillators.push(fundamental, overtone);
+      gains.push(noteGain);
+    });
+
+    filter.connect(masterGain);
+    masterGain.connect(outputNode);
+
+    for (let index = 0; index < oscillators.length; index += 1) {
+      const startOffset = Math.floor(index / 2) * 0.012;
+      oscillators[index].start(now + startOffset);
+      oscillators[index].stop(now + 0.42 + startOffset);
+    }
+
+    const activeVoice: PianoVoice = {
+      gain: masterGain,
+      sources: oscillators,
+      nodes: [filter, masterGain, ...gains],
+    };
+
+    activePianoVoicesRef.current.push(activeVoice);
+
+    oscillators[0].onended = () => {
+      for (const source of activeVoice.sources) {
+        source.disconnect();
+      }
+
+      for (const node of activeVoice.nodes) {
+        node.disconnect();
+      }
+
+      activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
+        (voice) => voice !== activeVoice,
+      );
+    };
   };
 
   const scheduleIdleRelease = () => {
@@ -1072,6 +1193,7 @@ function App() {
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
         setLastPianoNote("--");
+        resetPromptGame();
         setPerformanceStatus("Load a song and start typing to step through detected beats.");
         setAudioState("idle");
         setTrackDuration(null);
@@ -1091,6 +1213,7 @@ function App() {
       setPerformanceStep(0);
       setLastTriggeredBeat(null);
       setLastPianoNote("--");
+      resetPromptGame();
       setPerformanceStatus("Decoding the selected MP3...");
       setAudioState("loading");
       setTrackDuration(null);
@@ -1158,6 +1281,7 @@ function App() {
       setPerformanceStep(0);
       setLastTriggeredBeat(null);
       setLastPianoNote("--");
+      resetPromptGame();
       setPerformanceStatus("Load a song and start typing to step through detected beats.");
       return;
     }
@@ -1178,6 +1302,7 @@ function App() {
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
         setLastPianoNote("--");
+        resetPromptGame();
         setPerformanceStatus(
           nextPlayableSteps.length > 0
             ? "Typing mode is ready. Press any key to advance through the playable step map."
@@ -1207,6 +1332,19 @@ function App() {
       void audioContextRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (promptCursor < promptStream.length - 72) {
+      return;
+    }
+
+    setPromptStream((currentPrompt) => {
+      return `${currentPrompt}   ${buildPromptStream(nextPromptSeedIndex, 8)}`;
+    });
+    setNextPromptSeedIndex((currentIndex) => {
+      return (currentIndex + 8) % PROMPT_PHRASES.length;
+    });
+  }, [promptCursor, promptStream.length, nextPromptSeedIndex]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1248,6 +1386,9 @@ function App() {
         setPerformanceStep(rewoundIndex);
         setLastTriggeredBeat(rewoundBeat);
         setLastPianoNote(playbackMode === "piano" ? "Crash chord" : "Reverse slice");
+        if (isGameActive) {
+          setPromptCursor((currentCursor) => Math.max(0, currentCursor - 1));
+        }
         setAudioError(null);
         setPerformanceStatus(
           `Rewound to step ${rewoundIndex} of ${stepPositions.length}.`,
@@ -1300,6 +1441,38 @@ function App() {
 
       if (!canAcceptTriggerBurst()) {
         return;
+      }
+
+      const typedCharacter = getTypedCharacter(event);
+      const expectedCharacter = activePrompt[promptCursor]?.toLowerCase() ?? "";
+
+      if (isGameActive && typedCharacter) {
+        if (mistakeMode !== "off" && (!expectedCharacter || typedCharacter !== expectedCharacter)) {
+          void (async () => {
+            try {
+              const audioContext = await ensureAudioContext();
+              const referenceTime =
+                stepPositions[Math.min(currentBeatIndexRef.current, stepPositions.length - 1)] ??
+                null;
+              await playMistakeCue(audioContext, audioBuffer, referenceTime);
+            } catch {
+              // Mistake cue is best-effort only.
+            }
+          })();
+
+          if (mistakeMode === "strict") {
+            setPromptCursor((currentCursor) => Math.max(0, currentCursor - 1));
+          }
+          setLastPianoNote("Mistake cue");
+          setPerformanceStatus(
+            expectedCharacter
+              ? `Mistake: expected ${expectedCharacter === " " ? "space" : `"${expectedCharacter}"`}.`
+              : "Mistake: the phrase is complete. Keep going on the next prompt.",
+          );
+          return;
+        }
+
+        setPromptCursor((currentCursor) => Math.min(activePrompt.length, currentCursor + 1));
       }
 
       const paceLockEnabled = isPaceLocked;
@@ -1425,7 +1598,17 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [analysisState, playableSteps, playbackMode, isPaceLocked, typingFeel]);
+  }, [
+    analysisState,
+    playableSteps,
+    playbackMode,
+    isPaceLocked,
+    typingFeel,
+    activePrompt,
+    promptCursor,
+    mistakeMode,
+    isGameActive,
+  ]);
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -1650,6 +1833,73 @@ function App() {
               <span className={typingFeel === "normal" ? "feel-label-active" : ""}>Normal</span>
               <span className={typingFeel === "high" ? "feel-label-active" : ""}>High</span>
             </div>
+          </div>
+
+          <div className="feel-panel">
+            <label className="pace-label" htmlFor="mistake-mode">
+              Mistake mode
+            </label>
+            <div className="feel-slider-wrap">
+              <input
+                id="mistake-mode"
+                className="feel-slider"
+                type="range"
+                min="0"
+                max="2"
+                step="1"
+                value={MISTAKE_MODES.indexOf(mistakeMode)}
+                aria-label="Mistake mode"
+                onChange={(event) => {
+                  const nextMode =
+                    MISTAKE_MODES[Number(event.currentTarget.value)] ?? "words";
+                  setMistakeMode(nextMode);
+                }}
+              />
+            </div>
+            <div className="feel-labels" aria-hidden="true">
+              <span className={mistakeMode === "off" ? "feel-label-active" : ""}>Off</span>
+              <span className={mistakeMode === "normal" ? "feel-label-active" : ""}>Normal</span>
+              <span className={mistakeMode === "strict" ? "feel-label-active" : ""}>Strict</span>
+            </div>
+          </div>
+
+          <div className="prompt-card" aria-live="polite">
+            <div className="prompt-header">
+              <p className="prompt-label">Typing game</p>
+              <div className="prompt-actions">
+                <button
+                  className="prompt-button"
+                  type="button"
+                  onClick={() => setIsGameActive((current) => !current)}
+                >
+                  {isGameActive ? "Pause game" : "Play game"}
+                </button>
+                <button
+                  className="prompt-button prompt-button-secondary"
+                  type="button"
+                  onClick={resetPromptGame}
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+            <div className="prompt-stream-viewport" aria-hidden="true">
+              <div
+                className={`prompt-stream-track ${isGameActive ? "prompt-stream-active" : ""}`}
+                style={{ transform: `translateX(calc(42% - ${promptCursor}ch))` }}
+              >
+                <span className="prompt-done">{activePrompt.slice(0, promptCursor)}</span>
+                <span className="prompt-current">{activePrompt[promptCursor] ?? " "}</span>
+                <span className="prompt-remaining">{activePrompt.slice(promptCursor + 1)}</span>
+              </div>
+            </div>
+            <p className="prompt-caption">
+              {isGameActive
+                ? mistakeMode === "off"
+                  ? "Game is running with mistakes turned off."
+                  : "Type the scrolling line exactly, including spaces."
+                : "Press Play game to start the scrolling typing lane."}
+            </p>
           </div>
 
           <div className="typing-stats">
