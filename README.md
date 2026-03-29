@@ -16,8 +16,8 @@ Drop in a song, let the app analyze its rhythm, and then advance through the tra
 ## Downloads
 
 - [GitHub Releases](https://github.com/shariqsk/Type-a-tune/releases)
-- macOS (Apple Silicon): download the latest `.dmg` from the releases page when available.
-- Windows: planned release download on the same releases page.
+- macOS (Apple Silicon): download the latest signed `.dmg` from the releases page.
+- Windows: download the latest installer from the releases page.
 
 Current packaged artifacts created from this repo:
 
@@ -32,6 +32,12 @@ Current packaged artifacts created from this repo:
 2. Open it and move `Type-a-tune` into `Applications`.
 3. Launch the app.
 4. If you enable background typing, macOS may ask for keyboard monitoring permission.
+
+If macOS says the app is damaged, the release was not signed and notarized correctly for Gatekeeper. For a locally built test app, you can clear quarantine manually:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Type-a-tune.app
+```
 
 ### Windows
 
@@ -67,6 +73,24 @@ npm run tauri -- build --bundles app
 - `Song slices`, `Slow`, and `Keep song pace` are the current defaults.
 - Background typing on macOS works best from the packaged app, not just from `tauri dev`.
 - Lyrics mode is currently marked `WIP`.
+- GitHub Actions is configured to sign and notarize macOS releases when the Apple signing secrets are present.
+
+## Release Signing
+
+To publish a macOS build that opens without the "damaged" Gatekeeper error, add these GitHub repository secrets before tagging a release:
+
+- `APPLE_CERTIFICATE`
+- `APPLE_CERTIFICATE_PASSWORD`
+- `APPLE_SIGNING_IDENTITY`
+- `APPLE_ID`
+- `APPLE_PASSWORD`
+- `APPLE_TEAM_ID`
+
+The release workflow will then build:
+
+- macOS Apple Silicon (`aarch64-apple-darwin`)
+- macOS Intel (`x86_64-apple-darwin`)
+- Windows
 
 ## Stack
 

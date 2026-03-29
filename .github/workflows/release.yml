@@ -7,20 +7,101 @@ on:
       - "v*"
 
 jobs:
-  build:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version="$(python3 - <<'PY'
+          import json
+          print(json.load(open('package.json'))['version'])
+          PY
+          )"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure GitHub release exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          tag="v${{ steps.version.outputs.value }}"
+          body="$(cat <<'EOF'
+          Latest desktop builds for Type-a-tune.
+
+          Downloads:
+          - macOS DMG
+          - Windows installer
+          EOF
+          )"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+            --title "Type-a-tune v${{ steps.version.outputs.value }}" \
+            --notes "$body"
+
+  build-windows:
+    needs: create-release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish Windows release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Type-a-tune v__VERSION__
+          releaseBody: |
+            Latest desktop builds for Type-a-tune.
+
+            Downloads:
+            - macOS DMG
+            - Windows installer
+          releaseDraft: false
+          prerelease: false
+          args: ""
+
+  build-macos:
+    needs: create-release
+    runs-on: macos-latest
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-          - platform: windows-latest
-            args: ""
-
-    runs-on: ${{ matrix.platform }}
-
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +115,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+          targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -44,19 +125,77 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
+      - name: Prepare artifact paths
+        id: paths
+        shell: bash
+        run: |
+          version="${{ needs.create-release.outputs.version }}"
+          app_path="$PWD/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Type-a-tune.app"
+          app_zip="$PWD/Type-a-tune-notary-${{ matrix.arch }}.zip"
+          app_tgz="$PWD/Type-a-tune_${{ matrix.arch }}.app.tar.gz"
+          dmg_path="$PWD/Type-a-tune_${version}_${{ matrix.arch }}.dmg"
+          echo "app_path=$app_path" >> "$GITHUB_OUTPUT"
+          echo "app_zip=$app_zip" >> "$GITHUB_OUTPUT"
+          echo "app_tgz=$app_tgz" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed macOS app bundle
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: npm run tauri build -- --ci --target ${{ matrix.target }} --bundles app
+
+      - name: Notarize and staple app bundle
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          ditto -c -k --keepParent "${{ steps.paths.outputs.app_path }}" "${{ steps.paths.outputs.app_zip }}"
+          xcrun notarytool submit "${{ steps.paths.outputs.app_zip }}" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 2h
+          xcrun stapler staple "${{ steps.paths.outputs.app_path }}"
+
+      - name: Package stapled app
+        shell: bash
+        run: |
+          tar -czf "${{ steps.paths.outputs.app_tgz }}" \
+            -C "$(dirname "${{ steps.paths.outputs.app_path }}")" \
+            "$(basename "${{ steps.paths.outputs.app_path }}")"
+          hdiutil create \
+            -volname "Type-a-tune" \
+            -srcfolder "${{ steps.paths.outputs.app_path }}" \
+            -ov \
+            -format UDZO \
+            "${{ steps.paths.outputs.dmg_path }}"
+
+      - name: Notarize and staple DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          xcrun notarytool submit "${{ steps.paths.outputs.dmg_path }}" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 2h
+          xcrun stapler staple "${{ steps.paths.outputs.dmg_path }}"
+
+      - name: Upload notarized macOS assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
-          releaseName: Type-a-tune v__VERSION__
-          releaseBody: |
-            Latest desktop builds for Type-a-tune.
-
-            Downloads:
-            - macOS app bundle / DMG
-            - Windows installer
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+        shell: bash
+        run: |
+          gh release upload "v${{ needs.create-release.outputs.version }}" \
+            "${{ steps.paths.outputs.dmg_path }}" \
+            "${{ steps.paths.outputs.app_tgz }}" \
+            --clobber
