@@ -1,4 +1,5 @@
 use rdev::{listen, Event, EventType, Key};
+use serde::Serialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
@@ -6,16 +7,17 @@ use std::sync::{
 };
 use tauri::{Emitter, State};
 
+#[derive(Serialize, Clone)]
+struct GlobalKeypressPayload {
+    key: String,
+}
+
 struct BackgroundListenerState {
     enabled: Arc<AtomicBool>,
     started: Arc<AtomicBool>,
 }
 
-fn key_to_js_key(key: &Key) -> Option<&'static str> {
-    // Map purely from the Key enum — never touch event.name.
-    // rdev's string_from_code calls TSMGetInputSourceProperty which requires
-    // the main thread; calling it from the CGEventTap background thread
-    // triggers dispatch_assert_queue_fail and crashes the process.
+fn keycode_to_js_key(key: &Key) -> Option<&'static str> {
     match key {
         Key::KeyA => Some("a"),
         Key::KeyB => Some("b"),
@@ -77,83 +79,88 @@ fn read_audio_file(path: String) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
-fn set_background_mode(
-    enabled: bool,
+fn enable_background_typing(
     app_handle: tauri::AppHandle,
     state: State<BackgroundListenerState>,
 ) {
-    state.enabled.store(enabled, Ordering::Relaxed);
+    state.enabled.store(true, Ordering::Relaxed);
 
-    if enabled && !state.started.swap(true, Ordering::Relaxed) {
-        let enabled_flag = state.enabled.clone();
-        let (tx, rx) = mpsc::channel::<String>();
+    if state.started.swap(true, Ordering::Relaxed) {
+        return;
+    }
 
-        // Thread 1: receives keys from the channel and emits to the frontend.
-        // This is separate from the rdev callback so we never do IPC inside
-        // the CGEventTap callback (which crashes on macOS).
-        std::thread::spawn(move || {
-            while let Ok(key) = rx.recv() {
-                let _ = app_handle.emit("global-keydown", key);
+    let enabled_flag = state.enabled.clone();
+    let (tx, rx) = mpsc::channel::<String>();
+
+    // Thread 1: receives keys from channel and emits to frontend.
+    // Kept separate from the rdev callback so we never do Tauri IPC
+    // inside the CGEventTap callback (crashes on macOS).
+    let app_for_emit = app_handle.clone();
+    std::thread::spawn(move || {
+        while let Ok(key) = rx.recv() {
+            let _ = app_for_emit.emit("global-keypress", GlobalKeypressPayload { key });
+        }
+    });
+
+    // Thread 2: rdev event tap — callback only does a fast channel send.
+    std::thread::spawn(move || {
+        let ctrl_held = Arc::new(Mutex::new(false));
+        let alt_held = Arc::new(Mutex::new(false));
+        let meta_held = Arc::new(Mutex::new(false));
+
+        let ctrl = ctrl_held.clone();
+        let alt = alt_held.clone();
+        let meta = meta_held.clone();
+
+        let callback = move |event: Event| {
+            if !enabled_flag.load(Ordering::Relaxed) {
+                return;
             }
-        });
-
-        // Thread 2: rdev event tap — callback only does fast channel send.
-        std::thread::spawn(move || {
-            let ctrl_held = Arc::new(Mutex::new(false));
-            let alt_held = Arc::new(Mutex::new(false));
-            let meta_held = Arc::new(Mutex::new(false));
-
-            let ctrl = ctrl_held.clone();
-            let alt = alt_held.clone();
-            let meta = meta_held.clone();
-
-            let callback = move |event: Event| {
-                if !enabled_flag.load(Ordering::Relaxed) {
-                    return;
-                }
-                match &event.event_type {
-                    EventType::KeyPress(key) => match key {
-                        Key::ControlLeft | Key::ControlRight => {
-                            *ctrl.lock().unwrap() = true;
-                        }
-                        Key::Alt | Key::AltGr => {
-                            *alt.lock().unwrap() = true;
-                        }
-                        Key::MetaLeft | Key::MetaRight => {
-                            *meta.lock().unwrap() = true;
-                        }
-                        _ => {
-                            let no_modifiers = !*ctrl.lock().unwrap()
-                                && !*alt.lock().unwrap()
-                                && !*meta.lock().unwrap();
-                            if no_modifiers {
-                                if let Some(js_key) = key_to_js_key(&key) {
-                                    let _ = tx.send(js_key.to_string());
-                                }
+            match &event.event_type {
+                EventType::KeyPress(key) => match key {
+                    Key::ControlLeft | Key::ControlRight => {
+                        *ctrl.lock().unwrap() = true;
+                    }
+                    Key::Alt | Key::AltGr => {
+                        *alt.lock().unwrap() = true;
+                    }
+                    Key::MetaLeft | Key::MetaRight => {
+                        *meta.lock().unwrap() = true;
+                    }
+                    _ => {
+                        let no_modifiers = !*ctrl.lock().unwrap()
+                            && !*alt.lock().unwrap()
+                            && !*meta.lock().unwrap();
+                        if no_modifiers {
+                            if let Some(js_key) = keycode_to_js_key(key) {
+                                let _ = tx.send(js_key.to_string());
                             }
                         }
-                    },
-                    EventType::KeyRelease(key) => match key {
-                        Key::ControlLeft | Key::ControlRight => {
-                            *ctrl.lock().unwrap() = false;
-                        }
-                        Key::Alt | Key::AltGr => {
-                            *alt.lock().unwrap() = false;
-                        }
-                        Key::MetaLeft | Key::MetaRight => {
-                            *meta.lock().unwrap() = false;
-                        }
-                        _ => {}
-                    },
+                    }
+                },
+                EventType::KeyRelease(key) => match key {
+                    Key::ControlLeft | Key::ControlRight => {
+                        *ctrl.lock().unwrap() = false;
+                    }
+                    Key::Alt | Key::AltGr => {
+                        *alt.lock().unwrap() = false;
+                    }
+                    Key::MetaLeft | Key::MetaRight => {
+                        *meta.lock().unwrap() = false;
+                    }
                     _ => {}
-                }
-            };
-
-            if let Err(e) = listen(callback) {
-                eprintln!("Global keyboard listener failed: {:?}", e);
+                },
+                _ => {}
             }
-        });
-    }
+        };
+
+        if let Err(e) = listen(callback) {
+            let _ = app_handle.emit(
+                "global-keypress-error",
+                format!("Keyboard listener failed: {:?}. Grant Input Monitoring in System Settings > Privacy & Security.", e),
+            );
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -164,7 +171,7 @@ pub fn run() {
             enabled: Arc::new(AtomicBool::new(false)),
             started: Arc::new(AtomicBool::new(false)),
         })
-        .invoke_handler(tauri::generate_handler![read_audio_file, set_background_mode])
+        .invoke_handler(tauri::generate_handler![read_audio_file, enable_background_typing])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
