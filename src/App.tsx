@@ -7,6 +7,8 @@ type UploadedSong = {
   name: string;
   path?: string;
   file?: File;
+  url?: string;
+  isDefault?: boolean;
 };
 
 type AnalysisResult = {
@@ -42,6 +44,11 @@ const TYPING_FEELS: TypingFeel[] = ["slow", "normal", "high"];
 const MISTAKE_MODES: MistakeMode[] = ["off", "normal", "strict"];
 const INITIAL_PROMPT_WORD_COUNT = 96;
 const APPEND_PROMPT_WORD_COUNT = 48;
+const DEFAULT_SONG: UploadedSong = {
+  name: "Built-in Piano Demo",
+  url: "/demo-piano.wav",
+  isDefault: true,
+};
 const PROMPT_WORD_BANK = [
   "the",
   "piano",
@@ -519,7 +526,7 @@ function App() {
   const manualStopRef = useRef(false);
   const currentBeatIndexRef = useRef(0);
   const [isDragActive, setIsDragActive] = useState(false);
-  const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(null);
+  const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(DEFAULT_SONG);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [decodedAudioBuffer, setDecodedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
@@ -533,9 +540,9 @@ function App() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [playableSteps, setPlayableSteps] = useState<number[]>([]);
-  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("piano");
-  const [isPaceLocked, setIsPaceLocked] = useState(false);
-  const [typingFeel, setTypingFeel] = useState<TypingFeel>("normal");
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("slices");
+  const [isPaceLocked, setIsPaceLocked] = useState(true);
+  const [typingFeel, setTypingFeel] = useState<TypingFeel>("slow");
   const [mistakeMode, setMistakeMode] = useState<MistakeMode>("normal");
   const [gameSourceMode, setGameSourceMode] = useState<GameSourceMode>("flow");
   const [isGameActive, setIsGameActive] = useState(false);
@@ -1332,6 +1339,14 @@ function App() {
             path: uploadedSong.path,
           });
           arrayBuffer = Uint8Array.from(bytes).buffer;
+        } else if (uploadedSong.url) {
+          const response = await fetch(uploadedSong.url);
+
+          if (!response.ok) {
+            throw new Error("Unable to load the bundled demo song.");
+          }
+
+          arrayBuffer = await response.arrayBuffer();
         } else {
           throw new Error("No audio source is available.");
         }
@@ -1831,7 +1846,9 @@ function App() {
         <p className="dropzone-title">Drag and drop an MP3 here</p>
         <p className="dropzone-caption">
           {uploadedSong
-            ? "The song is loaded into app memory for this session."
+            ? uploadedSong.isDefault
+              ? "A bundled piano demo is loaded by default until you replace it."
+              : "The song is loaded into app memory for this session."
             : "Your uploaded song stays in app memory for this session."}
         </p>
 
@@ -1846,7 +1863,9 @@ function App() {
         <div className="dropzone-status" aria-live="polite">
           {uploadedSong ? (
             <>
-              <p className="status-label">Loaded song</p>
+              <p className="status-label">
+                {uploadedSong.isDefault ? "Default song" : "Loaded song"}
+              </p>
               <p className="status-file">{uploadedSong.name}</p>
               <p className="status-meta">
                 Web Audio buffer: {audioState} • {formatTime(trackDuration)}
