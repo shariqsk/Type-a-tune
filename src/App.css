@@ -444,15 +444,24 @@ h1 {
   overflow: hidden;
   border-top: 1px solid rgba(245, 237, 224, 0.06);
   border-bottom: 1px solid rgba(245, 237, 224, 0.06);
+  mask-image: linear-gradient(90deg, transparent 0%, black 10%, black 90%, transparent 100%);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    black 10%,
+    black 90%,
+    transparent 100%
+  );
 }
 
 .prompt-stream-track {
   white-space: pre;
-  font-size: 1.08rem;
+  font-size: 1.14rem;
   line-height: 1.7;
   font-family: "SF Mono", "SFMono-Regular", ui-monospace, monospace;
   color: rgba(245, 237, 224, 0.78);
   transition: transform 180ms ease;
+  min-width: max-content;
 }
 
 .prompt-stream-active {

@@ -39,12 +39,102 @@ const MIN_BPM = 70;
 const MAX_BPM = 170;
 const TYPING_FEELS: TypingFeel[] = ["slow", "normal", "high"];
 const MISTAKE_MODES: MistakeMode[] = ["off", "normal", "strict"];
-const PROMPT_PHRASES = [
-  "moonlight on the keys",
-  "type the melody alive",
-  "soft chords under your hands",
-  "piano sparks in motion",
-  "let the rhythm breathe",
+const INITIAL_PROMPT_WORD_COUNT = 96;
+const APPEND_PROMPT_WORD_COUNT = 48;
+const PROMPT_WORD_BANK = [
+  "the",
+  "piano",
+  "keeps",
+  "breathing",
+  "under",
+  "your",
+  "hands",
+  "while",
+  "the",
+  "melody",
+  "glides",
+  "forward",
+  "through",
+  "warm",
+  "lights",
+  "and",
+  "soft",
+  "echoes",
+  "every",
+  "letter",
+  "lands",
+  "like",
+  "a",
+  "note",
+  "inside",
+  "the",
+  "room",
+  "and",
+  "the",
+  "rhythm",
+  "stays",
+  "close",
+  "to",
+  "your",
+  "pulse",
+  "as",
+  "gentle",
+  "chords",
+  "rise",
+  "and",
+  "fall",
+  "without",
+  "breaking",
+  "the",
+  "flow",
+  "of",
+  "the",
+  "song",
+  "you",
+  "keep",
+  "typing",
+  "through",
+  "silver",
+  "tones",
+  "that",
+  "open",
+  "into",
+  "a",
+  "long",
+  "line",
+  "of",
+  "motion",
+  "and",
+  "the",
+  "music",
+  "answers",
+  "with",
+  "steady",
+  "weight",
+  "soft",
+  "spark",
+  "quiet",
+  "drift",
+  "gold",
+  "hammer",
+  "felt",
+  "strings",
+  "moving",
+  "clear",
+  "across",
+  "the",
+  "air",
+  "in",
+  "one",
+  "continuous",
+  "stream",
+  "that",
+  "does",
+  "not",
+  "stutter",
+  "or",
+  "fall",
+  "apart",
 ];
 
 const normalizeBpm = (value: number) => {
@@ -319,9 +409,9 @@ const getTypedCharacter = (event: KeyboardEvent) => {
   return event.key.length === 1 ? event.key.toLowerCase() : "";
 };
 
-const buildPromptStream = (startIndex: number, phraseCount: number) => {
-  return Array.from({ length: phraseCount }, (_, index) => {
-    return PROMPT_PHRASES[(startIndex + index) % PROMPT_PHRASES.length];
+const buildPromptStream = (startIndex: number, wordCount: number) => {
+  return Array.from({ length: wordCount }, (_, index) => {
+    return PROMPT_WORD_BANK[(startIndex + index) % PROMPT_WORD_BANK.length];
   }).join(" ");
 };
 
@@ -446,9 +536,11 @@ function App() {
   const [typingFeel, setTypingFeel] = useState<TypingFeel>("normal");
   const [mistakeMode, setMistakeMode] = useState<MistakeMode>("normal");
   const [isGameActive, setIsGameActive] = useState(false);
-  const [promptStream, setPromptStream] = useState(() => buildPromptStream(0, 14));
+  const [promptStream, setPromptStream] = useState(() =>
+    buildPromptStream(0, INITIAL_PROMPT_WORD_COUNT),
+  );
   const [nextPromptSeedIndex, setNextPromptSeedIndex] = useState(
-    14 % PROMPT_PHRASES.length,
+    INITIAL_PROMPT_WORD_COUNT % PROMPT_WORD_BANK.length,
   );
   const [promptCursor, setPromptCursor] = useState(0);
   const [performanceStep, setPerformanceStep] = useState(0);
@@ -476,8 +568,8 @@ function App() {
   };
 
   const resetPromptGame = () => {
-    setPromptStream(buildPromptStream(0, 14));
-    setNextPromptSeedIndex(14 % PROMPT_PHRASES.length);
+    setPromptStream(buildPromptStream(0, INITIAL_PROMPT_WORD_COUNT));
+    setNextPromptSeedIndex(INITIAL_PROMPT_WORD_COUNT % PROMPT_WORD_BANK.length);
     setPromptCursor(0);
     setIsGameActive(false);
   };
@@ -1334,15 +1426,15 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (promptCursor < promptStream.length - 72) {
+    if (promptCursor < promptStream.length - 180) {
       return;
     }
 
     setPromptStream((currentPrompt) => {
-      return `${currentPrompt} ${buildPromptStream(nextPromptSeedIndex, 8)}`;
+      return `${currentPrompt} ${buildPromptStream(nextPromptSeedIndex, APPEND_PROMPT_WORD_COUNT)}`;
     });
     setNextPromptSeedIndex((currentIndex) => {
-      return (currentIndex + 8) % PROMPT_PHRASES.length;
+      return (currentIndex + APPEND_PROMPT_WORD_COUNT) % PROMPT_WORD_BANK.length;
     });
   }, [promptCursor, promptStream.length, nextPromptSeedIndex]);
 
