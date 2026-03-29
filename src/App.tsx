@@ -257,6 +257,8 @@ const formatMidiNote = (midi: number) => {
   return `${noteName}${octave}`;
 };
 
+const clampMidi = (midi: number) => Math.max(36, Math.min(84, midi));
+
 const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
   const sampleRate = audioBuffer.sampleRate;
   const channelCount = audioBuffer.numberOfChannels;
@@ -308,25 +310,37 @@ const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
   };
 };
 
+const isEditableTarget = (target: EventTarget | null) => {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+};
+
 const isTypingPerformanceKey = (event: KeyboardEvent) => {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
     return false;
   }
 
-  if (event.key === "Backspace") {
-    return false;
-  }
-
-  if (
-    event.target instanceof HTMLInputElement ||
-    event.target instanceof HTMLTextAreaElement ||
-    event.target instanceof HTMLSelectElement ||
-    (event.target instanceof HTMLElement && event.target.isContentEditable)
-  ) {
+  if (event.key === "Backspace" || isEditableTarget(event.target)) {
     return false;
   }
 
   return event.key.length === 1 || event.key === " " || event.key === "Enter";
+};
+
+const isRewindKey = (event: KeyboardEvent) => {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
+    return false;
+  }
+
+  if (isEditableTarget(event.target)) {
+    return false;
+  }
+
+  return event.key === "Backspace";
 };
 
 function App() {
@@ -579,6 +593,159 @@ function App() {
     return formatMidiNote(tone.midi);
   };
 
+  const playRewindCue = async (
+    audioContext: AudioContext,
+    audioBuffer: AudioBuffer,
+    startTime: number,
+    mode: PlaybackMode,
+  ) => {
+    const now = audioContext.currentTime;
+
+    if (mode === "slices") {
+      const snippetDuration = 0.3;
+      const snippetStart = Math.max(0, startTime - snippetDuration);
+      const snippetEnd = Math.min(audioBuffer.duration, startTime + 0.04);
+      const frameStart = Math.floor(snippetStart * audioBuffer.sampleRate);
+      const frameEnd = Math.max(
+        frameStart + 1,
+        Math.floor(snippetEnd * audioBuffer.sampleRate),
+      );
+      const frameLength = frameEnd - frameStart;
+      const reversedBuffer = audioContext.createBuffer(
+        audioBuffer.numberOfChannels,
+        frameLength,
+        audioBuffer.sampleRate,
+      );
+
+      for (
+        let channelIndex = 0;
+        channelIndex < audioBuffer.numberOfChannels;
+        channelIndex += 1
+      ) {
+        const sourceData = audioBuffer.getChannelData(channelIndex);
+        const targetData = reversedBuffer.getChannelData(channelIndex);
+
+        for (let index = 0; index < frameLength; index += 1) {
+          targetData[index] = sourceData[frameEnd - index - 1] ?? 0;
+        }
+      }
+
+      const sourceNode = audioContext.createBufferSource();
+      const filter = audioContext.createBiquadFilter();
+      const gainNode = audioContext.createGain();
+      const safeDuration = Math.min(0.28, reversedBuffer.duration);
+
+      sourceNode.buffer = reversedBuffer;
+      sourceNode.playbackRate.setValueAtTime(0.92, now);
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(1200, now);
+      filter.Q.value = 0.7;
+
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.linearRampToValueAtTime(0.2, now + 0.018);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + safeDuration);
+
+      sourceNode.connect(filter);
+      filter.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+
+      const activeVoice: PianoVoice = {
+        sources: [sourceNode],
+        nodes: [filter, gainNode],
+      };
+
+      activePianoVoicesRef.current.push(activeVoice);
+
+      sourceNode.onended = () => {
+        sourceNode.disconnect();
+        filter.disconnect();
+        gainNode.disconnect();
+        activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
+          (voice) => voice !== activeVoice,
+        );
+      };
+
+      sourceNode.start(now, 0, safeDuration);
+      return "Reverse slice";
+    }
+
+    const tone = analyzeStepTone(audioBuffer, startTime);
+    const noteDuration = 0.72;
+    const crashMidis = [
+      clampMidi(tone.midi - 12),
+      clampMidi(tone.midi - 1),
+      clampMidi(tone.midi + 2),
+      clampMidi(tone.midi + 6),
+    ];
+    const masterGain = audioContext.createGain();
+    const filter = audioContext.createBiquadFilter();
+    const oscillators: OscillatorNode[] = [];
+    const noteGains: GainNode[] = [];
+
+    masterGain.gain.setValueAtTime(0.0001, now);
+    masterGain.gain.linearRampToValueAtTime(0.32, now + 0.012);
+    masterGain.gain.exponentialRampToValueAtTime(0.06, now + 0.22);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(1500, now);
+    filter.frequency.exponentialRampToValueAtTime(680, now + noteDuration);
+    filter.Q.value = 1.1;
+
+    crashMidis.forEach((midi, index) => {
+      const oscillator = audioContext.createOscillator();
+      const noteGain = audioContext.createGain();
+      const frequency = midiToFrequency(midi);
+      const detuneOffset = [-18, 11, -9, 16][index] ?? 0;
+
+      oscillator.type = index % 2 === 0 ? "triangle" : "sine";
+      oscillator.frequency.setValueAtTime(frequency * 1.03, now);
+      oscillator.frequency.exponentialRampToValueAtTime(
+        frequency * (index === 0 ? 0.88 : 0.96),
+        now + 0.16,
+      );
+      oscillator.detune.setValueAtTime(detuneOffset, now);
+
+      noteGain.gain.value = index === 0 ? 0.48 : index === 1 ? 0.36 : 0.22;
+      oscillator.connect(noteGain);
+      noteGain.connect(filter);
+
+      noteGains.push(noteGain);
+      oscillators.push(oscillator);
+    });
+
+    filter.connect(masterGain);
+    masterGain.connect(audioContext.destination);
+
+    for (const oscillator of oscillators) {
+      oscillator.start(now);
+      oscillator.stop(now + noteDuration + 0.05);
+    }
+
+    const activeVoice: PianoVoice = {
+      sources: oscillators,
+      nodes: [filter, masterGain, ...noteGains],
+    };
+
+    activePianoVoicesRef.current.push(activeVoice);
+
+    oscillators[0].onended = () => {
+      for (const source of activeVoice.sources) {
+        source.disconnect();
+      }
+
+      for (const node of activeVoice.nodes) {
+        node.disconnect();
+      }
+
+      activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
+        (voice) => voice !== activeVoice,
+      );
+    };
+
+    return "Crash chord";
+  };
+
   const pauseTransportPlayback = () => {
     const audioContext = audioContextRef.current;
 
@@ -828,6 +995,54 @@ function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (isRewindKey(event)) {
+        const audioBuffer = audioBufferRef.current;
+        const stepPositions = playableSteps;
+
+        if (!audioBuffer || stepPositions.length === 0 || analysisState !== "ready") {
+          return;
+        }
+
+        event.preventDefault();
+        pauseTransportPlayback();
+
+        if (currentBeatIndexRef.current <= 0) {
+          setPerformanceStatus("Already at the beginning of the playable step map.");
+          return;
+        }
+
+        const rewoundIndex = currentBeatIndexRef.current - 1;
+        const rewoundBeat = stepPositions[rewoundIndex];
+
+        currentBeatIndexRef.current = rewoundIndex;
+        setPerformanceStep(rewoundIndex);
+        setLastTriggeredBeat(rewoundBeat);
+        setLastPianoNote(playbackMode === "piano" ? "Crash chord" : "Reverse slice");
+        setAudioError(null);
+        setPerformanceStatus(
+          `Rewound to step ${rewoundIndex} of ${stepPositions.length}.`,
+        );
+
+        void (async () => {
+          try {
+            const audioContext = await ensureAudioContext();
+            const cueLabel = await playRewindCue(
+              audioContext,
+              audioBuffer,
+              rewoundBeat,
+              playbackMode,
+            );
+            setLastPianoNote(cueLabel);
+          } catch (error) {
+            setAudioError(
+              error instanceof Error ? error.message : "Rewind cue playback failed.",
+            );
+          }
+        })();
+
+        return;
+      }
+
       if (!isTypingPerformanceKey(event)) {
         return;
       }
