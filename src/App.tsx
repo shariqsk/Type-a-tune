@@ -10,6 +10,7 @@ type UploadedSong = {
 
 function App() {
   const dropzoneRef = useRef<HTMLElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -27,6 +28,15 @@ function App() {
 
   const handleUploadError = (message: string) => {
     setUploadError(message);
+  };
+
+  const loadFileIntoMemory = (file: File) => {
+    if (!isMp3File(file.name)) {
+      handleUploadError("Only MP3 files are supported right now.");
+      return;
+    }
+
+    handleSongSelection({ name: file.name, file });
   };
 
   const isInsideDropzone = (x: number, y: number) => {
@@ -141,9 +151,24 @@ function App() {
             return;
           }
 
-          handleSongSelection({ name: droppedFile.name, file: droppedFile });
+          loadFileIntoMemory(droppedFile);
         }}
       >
+        <input
+          ref={fileInputRef}
+          className="file-input"
+          type="file"
+          accept=".mp3,audio/mpeg"
+          onChange={(event) => {
+            const selectedFile = event.currentTarget.files?.[0];
+
+            if (selectedFile) {
+              loadFileIntoMemory(selectedFile);
+            }
+
+            event.currentTarget.value = "";
+          }}
+        />
         <div className="dropzone-icon" aria-hidden="true">
           ♪
         </div>
@@ -153,6 +178,14 @@ function App() {
             ? "The song is loaded into app memory for this session."
             : "Your uploaded song stays in app memory for this session."}
         </p>
+
+        <button
+          className="browse-button"
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          Choose MP3
+        </button>
 
         <div className="dropzone-status" aria-live="polite">
           {uploadedSong ? (
