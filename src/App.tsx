@@ -358,6 +358,7 @@ function App() {
   const activePianoVoicesRef = useRef<PianoVoice[]>([]);
   const idleReleaseTimerRef = useRef<number | null>(null);
   const performanceClockRef = useRef<PerformanceClock | null>(null);
+  const lastTriggerAtRef = useRef(0);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
   const manualStopRef = useRef(false);
@@ -489,6 +490,17 @@ function App() {
     }
 
     return index;
+  };
+
+  const canAcceptTriggerBurst = () => {
+    const now = Date.now();
+
+    if (now - lastTriggerAtRef.current < 45) {
+      return false;
+    }
+
+    lastTriggerAtRef.current = now;
+    return true;
   };
 
   const playRawSliceStep = async (
@@ -1276,6 +1288,10 @@ function App() {
         pauseTransportPlayback();
         clearIdleRelease();
 
+        if (!canAcceptTriggerBurst()) {
+          return;
+        }
+
         void ensureAudioContext().then((audioContext) => {
           duckActiveVoices(audioContext);
         });
@@ -1346,6 +1362,10 @@ function App() {
       pauseTransportPlayback();
       clearIdleRelease();
 
+      if (!canAcceptTriggerBurst()) {
+        return;
+      }
+
       const paceLockEnabled = paceLockAmount >= 50;
       let stepIndexToPlay = beatIndex;
       let startTime = stepPositions[beatIndex];
@@ -1375,6 +1395,12 @@ function App() {
         resetPerformanceClock();
       }
 
+      currentBeatIndexRef.current = Math.max(
+        currentBeatIndexRef.current,
+        stepIndexToPlay + 1,
+      );
+      setPerformanceStep(currentBeatIndexRef.current);
+
       void (async () => {
         try {
           const audioContext = await ensureAudioContext();
@@ -1393,11 +1419,6 @@ function App() {
             );
           }
 
-          currentBeatIndexRef.current = Math.max(
-            currentBeatIndexRef.current,
-            stepIndexToPlay + 1,
-          );
-          setPerformanceStep(currentBeatIndexRef.current);
           setLastTriggeredBeat(startTime);
           setLastPianoNote(playedLabel);
           setAudioError(null);
