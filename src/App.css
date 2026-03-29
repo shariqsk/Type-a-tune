@@ -425,9 +425,69 @@ h1 {
   cursor: pointer;
 }
 
+.prompt-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .prompt-button-secondary {
   background: rgba(255, 255, 255, 0.06);
   color: rgba(245, 237, 224, 0.72);
+}
+
+.lyrics-panel {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(245, 237, 224, 0.06);
+}
+
+.lyrics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lyrics-textarea {
+  width: 100%;
+  min-height: 116px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(245, 237, 224, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5ede0;
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.lyrics-textarea::placeholder {
+  color: rgba(245, 237, 224, 0.34);
+}
+
+.lyrics-offset-panel {
+  margin-top: 14px;
+}
+
+.lyrics-offset-row {
+  width: min(260px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.lyrics-offset-row .feel-slider {
+  flex: 1;
+}
+
+.lyrics-offset-value {
+  min-width: 3.4rem;
+  font-size: 0.82rem;
+  color: #f8dab1;
+  text-align: right;
 }
 
 .prompt-label {
@@ -444,14 +504,7 @@ h1 {
   overflow: hidden;
   border-top: 1px solid rgba(245, 237, 224, 0.06);
   border-bottom: 1px solid rgba(245, 237, 224, 0.06);
-  mask-image: linear-gradient(90deg, transparent 0%, black 10%, black 90%, transparent 100%);
-  -webkit-mask-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    black 10%,
-    black 90%,
-    transparent 100%
-  );
+  position: relative;
 }
 
 .prompt-stream-track {
@@ -460,12 +513,11 @@ h1 {
   line-height: 1.7;
   font-family: "SF Mono", "SFMono-Regular", ui-monospace, monospace;
   color: rgba(245, 237, 224, 0.78);
-  transition: transform 180ms ease;
-  min-width: max-content;
+  min-height: 2rem;
 }
 
 .prompt-stream-active {
-  transition-duration: 120ms;
+  opacity: 1;
 }
 
 .prompt-done {
