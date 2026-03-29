@@ -698,8 +698,8 @@ function App() {
       Math.max(0, audioBuffer.duration - 0.02),
     );
     const tailDuration = Math.min(
-      0.85,
-      Math.max(0.35, Math.max(nextTime - tailStart, 0.42)),
+      1.2,
+      Math.max(0.55, Math.max(nextTime - tailStart + 0.18, 0.62)),
     );
     const safeDuration = Math.min(tailDuration, audioBuffer.duration - tailStart);
     const now = audioContext.currentTime;
@@ -713,8 +713,8 @@ function App() {
     filter.Q.value = 0.45;
 
     gainNode.gain.setValueAtTime(0.0001, now);
-    gainNode.gain.linearRampToValueAtTime(0.18, now + 0.04);
-    gainNode.gain.setValueAtTime(0.18, now + Math.max(0.14, safeDuration - 0.18));
+    gainNode.gain.linearRampToValueAtTime(0.16, now + 0.06);
+    gainNode.gain.setValueAtTime(0.16, now + Math.max(0.2, safeDuration - 0.26));
     gainNode.gain.exponentialRampToValueAtTime(0.0001, now + safeDuration);
 
     sourceNode.connect(filter);
@@ -748,7 +748,7 @@ function App() {
   ) => {
     const tone = analyzeStepTone(audioBuffer, startTime);
     const now = audioContext.currentTime;
-    const duration = 1.8;
+    const duration = 2.4;
     const frequencies = [
       midiToFrequency(tone.midi),
       midiToFrequency(clampMidi(tone.midi + 12)),
@@ -759,13 +759,13 @@ function App() {
     const noteGains: GainNode[] = [];
 
     masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.14, now + 0.05);
-    masterGain.gain.exponentialRampToValueAtTime(0.055, now + 0.55);
+    masterGain.gain.linearRampToValueAtTime(0.12, now + 0.08);
+    masterGain.gain.exponentialRampToValueAtTime(0.065, now + 0.82);
     masterGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
     filter.type = "lowpass";
     filter.frequency.setValueAtTime(1900, now);
-    filter.frequency.exponentialRampToValueAtTime(720, now + duration);
+    filter.frequency.exponentialRampToValueAtTime(680, now + duration);
     filter.Q.value = 0.5;
 
     frequencies.forEach((frequency, index) => {
@@ -851,7 +851,7 @@ function App() {
           // Idle release is decorative; skip hard failures here.
         }
       })();
-    }, 280);
+    }, 700);
   };
 
   const sustainCurrentStep = async (
