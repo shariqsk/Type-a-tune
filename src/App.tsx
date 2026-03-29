@@ -359,6 +359,7 @@ function App() {
   const idleReleaseTimerRef = useRef<number | null>(null);
   const performanceClockRef = useRef<PerformanceClock | null>(null);
   const lastPlayedStepIndexRef = useRef<number | null>(null);
+  const pendingStepIndexRef = useRef<number | null>(null);
   const lastTriggerAtRef = useRef(0);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
@@ -468,7 +469,7 @@ function App() {
 
   const duckActiveVoices = (audioContext: AudioContext) => {
     for (const voice of [...activePianoVoicesRef.current]) {
-      releaseVoice(voice, audioContext, 0.06);
+      releaseVoice(voice, audioContext, 0.1);
     }
   };
 
@@ -482,6 +483,7 @@ function App() {
   const resetPerformanceClock = () => {
     performanceClockRef.current = null;
     lastPlayedStepIndexRef.current = null;
+    pendingStepIndexRef.current = null;
   };
 
   const findPacedStepIndex = (stepPositions: number[], songTime: number) => {
@@ -497,7 +499,7 @@ function App() {
   const canAcceptTriggerBurst = () => {
     const now = Date.now();
 
-    if (now - lastTriggerAtRef.current < 18) {
+    if (now - lastTriggerAtRef.current < 32) {
       return false;
     }
 
@@ -521,8 +523,11 @@ function App() {
     const previewLead = 0.012;
     const sliceStart = Math.max(0, startTime - previewLead);
     const sliceDuration = Math.max(
-      paced ? 0.42 : 0.18,
-      Math.min(paced ? 0.98 : 0.52, Math.max(nextTime - sliceStart + (paced ? 0.08 : 0), 0.26)),
+      paced ? 0.62 : 0.18,
+      Math.min(
+        paced ? 1.28 : 0.52,
+        Math.max(nextTime - sliceStart + (paced ? 0.24 : 0), 0.26),
+      ),
     );
     const safeStart = Math.min(
       Math.max(0, sliceStart),
@@ -575,7 +580,7 @@ function App() {
     const nextTime =
       stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.72);
     const noteDuration = paced
-      ? Math.max(0.72, Math.min(1.85, nextTime - startTime + 0.24))
+      ? Math.max(0.92, Math.min(2.1, nextTime - startTime + 0.4))
       : 1.2;
     const fundamental = midiToFrequency(tone.midi);
     const chordMidis =
@@ -847,6 +852,26 @@ function App() {
         }
       })();
     }, 280);
+  };
+
+  const sustainCurrentStep = async (
+    audioContext: AudioContext,
+    audioBuffer: AudioBuffer,
+    mode: PlaybackMode,
+    startTime: number,
+    stepPositions: number[],
+    stepIndex: number,
+  ) => {
+    if (activePianoVoicesRef.current.length > 0) {
+      return;
+    }
+
+    if (mode === "piano") {
+      await playIdlePianoTail(audioContext, audioBuffer, startTime);
+      return;
+    }
+
+    await playIdleSliceTail(audioContext, audioBuffer, startTime, stepPositions, stepIndex);
   };
 
   const playRewindCue = async (
@@ -1235,6 +1260,7 @@ function App() {
       setPlayableSteps([]);
       currentBeatIndexRef.current = 0;
       lastPlayedStepIndexRef.current = null;
+      pendingStepIndexRef.current = null;
       clearIdleRelease();
       resetPerformanceClock();
       setPerformanceStep(0);
@@ -1256,6 +1282,7 @@ function App() {
         setAnalysisState("ready");
         currentBeatIndexRef.current = 0;
         lastPlayedStepIndexRef.current = null;
+        pendingStepIndexRef.current = null;
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
         setLastPianoNote("--");
@@ -1323,6 +1350,7 @@ function App() {
           wallStartTime: Date.now(),
         };
         lastPlayedStepIndexRef.current = null;
+        pendingStepIndexRef.current = null;
 
         currentBeatIndexRef.current = rewoundIndex;
         setPerformanceStep(rewoundIndex);
@@ -1412,6 +1440,35 @@ function App() {
         resetPerformanceClock();
       }
 
+      const isDuplicateStep =
+        pendingStepIndexRef.current === stepIndexToPlay ||
+        lastPlayedStepIndexRef.current === stepIndexToPlay;
+
+      if (paceLockEnabled && isDuplicateStep) {
+        void (async () => {
+          try {
+            const audioContext = await ensureAudioContext();
+            await sustainCurrentStep(
+              audioContext,
+              audioBuffer,
+              playbackMode,
+              startTime,
+              stepPositions,
+              stepIndexToPlay,
+            );
+            scheduleIdleRelease(playbackMode, startTime, stepPositions, stepIndexToPlay);
+          } catch {
+            // Holding the current step is best-effort only.
+          }
+        })();
+
+        setLastTriggeredBeat(startTime);
+        setPerformanceStatus(
+          `Holding step ${stepIndexToPlay + 1} of ${stepPositions.length} at the song's pace.`,
+        );
+        return;
+      }
+
       if (shouldAdvanceStep) {
         currentBeatIndexRef.current = Math.max(
           currentBeatIndexRef.current,
@@ -1420,16 +1477,11 @@ function App() {
         setPerformanceStep(currentBeatIndexRef.current);
       }
 
+      pendingStepIndexRef.current = stepIndexToPlay;
+
       void (async () => {
         try {
           const audioContext = await ensureAudioContext();
-
-          if (paceLockEnabled && lastPlayedStepIndexRef.current === stepIndexToPlay) {
-            setPerformanceStatus(
-              `Holding step ${currentBeatIndexRef.current} at the song's pace.`,
-            );
-            return;
-          }
 
           duckActiveVoices(audioContext);
           let playedLabel = "Song slice";
@@ -1455,6 +1507,9 @@ function App() {
           }
 
           lastPlayedStepIndexRef.current = stepIndexToPlay;
+          if (pendingStepIndexRef.current === stepIndexToPlay) {
+            pendingStepIndexRef.current = null;
+          }
           setLastTriggeredBeat(startTime);
           setLastPianoNote(playedLabel);
           setAudioError(null);
@@ -1465,6 +1520,9 @@ function App() {
           );
           scheduleIdleRelease(playbackMode, startTime, stepPositions, stepIndexToPlay);
         } catch (error) {
+          if (pendingStepIndexRef.current === stepIndexToPlay) {
+            pendingStepIndexRef.current = null;
+          }
           setPerformanceStatus(
             playbackMode === "piano"
               ? "Unable to play the piano interpretation."
