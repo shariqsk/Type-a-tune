@@ -229,6 +229,42 @@ h1 {
   color: rgba(245, 237, 224, 0.52);
 }
 
+.typing-panel {
+  margin-top: 26px;
+  padding: 20px;
+  border-radius: 22px;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(245, 237, 224, 0.08);
+}
+
+.typing-stats {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.typing-stat {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(245, 237, 224, 0.06);
+}
+
+.typing-stat-label {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(245, 237, 224, 0.54);
+}
+
+.typing-stat-value {
+  margin: 8px 0 0;
+  color: #f8dab1;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
 .analysis-panel {
   margin-top: 26px;
   padding: 20px;
@@ -299,5 +335,9 @@ h1 {
   .dropzone-icon {
     width: 64px;
     height: 64px;
+  }
+
+  .typing-stats {
+    grid-template-columns: 1fr;
   }
 }

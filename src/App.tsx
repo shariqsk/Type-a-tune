@@ -204,15 +204,39 @@ const analyzeAudioBuffer = (audioBuffer: AudioBuffer): AnalysisResult => {
   };
 };
 
+const isTypingPerformanceKey = (event: KeyboardEvent) => {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
+    return false;
+  }
+
+  if (event.key === "Backspace") {
+    return false;
+  }
+
+  if (
+    event.target instanceof HTMLInputElement ||
+    event.target instanceof HTMLTextAreaElement ||
+    event.target instanceof HTMLSelectElement ||
+    (event.target instanceof HTMLElement && event.target.isContentEditable)
+  ) {
+    return false;
+  }
+
+  return event.key.length === 1 || event.key === " " || event.key === "Enter";
+};
+
 function App() {
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const sliceSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const sliceGainNodeRef = useRef<GainNode | null>(null);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
   const manualStopRef = useRef(false);
+  const currentBeatIndexRef = useRef(0);
   const [isDragActive, setIsDragActive] = useState(false);
   const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -227,6 +251,11 @@ function App() {
   >("idle");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [performanceStep, setPerformanceStep] = useState(0);
+  const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
+  const [performanceStatus, setPerformanceStatus] = useState(
+    "Load a song and start typing to step through detected beats.",
+  );
 
   const handleDragState = (isActive: boolean) => {
     setIsDragActive(isActive);
@@ -266,6 +295,34 @@ function App() {
     sourceNode.stop();
     sourceNode.disconnect();
     sourceNodeRef.current = null;
+  };
+
+  const stopSlicePlayback = () => {
+    const sliceSourceNode = sliceSourceNodeRef.current;
+    const sliceGainNode = sliceGainNodeRef.current;
+
+    if (sliceSourceNode) {
+      sliceSourceNode.stop();
+      sliceSourceNode.disconnect();
+      sliceSourceNodeRef.current = null;
+    }
+
+    if (sliceGainNode) {
+      sliceGainNode.disconnect();
+      sliceGainNodeRef.current = null;
+    }
+  };
+
+  const pauseTransportPlayback = () => {
+    const audioContext = audioContextRef.current;
+
+    if (!audioContext || !sourceNodeRef.current) {
+      return;
+    }
+
+    pausedAtRef.current = audioContext.currentTime - startedAtRef.current;
+    stopPlayback();
+    setAudioState("paused");
   };
 
   const formatTime = (value: number | null) => {
@@ -368,9 +425,14 @@ function App() {
     const loadUploadedSong = async () => {
       if (!uploadedSong) {
         stopPlayback();
+        stopSlicePlayback();
         audioBufferRef.current = null;
         setDecodedAudioBuffer(null);
         pausedAtRef.current = 0;
+        currentBeatIndexRef.current = 0;
+        setPerformanceStep(0);
+        setLastTriggeredBeat(null);
+        setPerformanceStatus("Load a song and start typing to step through detected beats.");
         setAudioState("idle");
         setTrackDuration(null);
         setAudioError(null);
@@ -378,9 +440,14 @@ function App() {
       }
 
       stopPlayback();
+      stopSlicePlayback();
       audioBufferRef.current = null;
       setDecodedAudioBuffer(null);
       pausedAtRef.current = 0;
+      currentBeatIndexRef.current = 0;
+      setPerformanceStep(0);
+      setLastTriggeredBeat(null);
+      setPerformanceStatus("Decoding the selected MP3...");
       setAudioState("loading");
       setTrackDuration(null);
       setAudioError(null);
@@ -437,6 +504,10 @@ function App() {
       setAnalysisState("idle");
       setAnalysisError(null);
       setAnalysisResult(null);
+      currentBeatIndexRef.current = 0;
+      setPerformanceStep(0);
+      setLastTriggeredBeat(null);
+      setPerformanceStatus("Load a song and start typing to step through detected beats.");
       return;
     }
 
@@ -448,6 +519,14 @@ function App() {
         const result = analyzeAudioBuffer(decodedAudioBuffer);
         setAnalysisResult(result);
         setAnalysisState("ready");
+        currentBeatIndexRef.current = 0;
+        setPerformanceStep(0);
+        setLastTriggeredBeat(null);
+        setPerformanceStatus(
+          result.beatPositions.length > 0
+            ? "Typing mode is ready. Press any key to advance to the next beat."
+            : "No reliable beats were detected for typing progression yet.",
+        );
 
         console.log("Detected beat timestamps (s):", result.beatPositions);
         console.log("Detected energy peaks (s):", result.energyPeaks);
@@ -466,9 +545,105 @@ function App() {
   useEffect(() => {
     return () => {
       stopPlayback();
+      stopSlicePlayback();
       void audioContextRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!isTypingPerformanceKey(event)) {
+        return;
+      }
+
+      const audioBuffer = audioBufferRef.current;
+      const beatPositions = analysisResult?.beatPositions ?? [];
+
+      if (!audioBuffer || beatPositions.length === 0 || analysisState !== "ready") {
+        return;
+      }
+
+      const beatIndex = currentBeatIndexRef.current;
+
+      if (beatIndex >= beatPositions.length) {
+        event.preventDefault();
+        setPerformanceStatus("Reached the end of the detected beat map.");
+        return;
+      }
+
+      event.preventDefault();
+      pauseTransportPlayback();
+      stopSlicePlayback();
+
+      const startTime = beatPositions[beatIndex];
+      const nextTime =
+        beatPositions[beatIndex + 1] ??
+        Math.min(audioBuffer.duration, startTime + 0.28);
+      const sliceDuration = Math.max(
+        0.1,
+        Math.min(0.42, Math.max(nextTime - startTime, 0.16)),
+      );
+
+      void (async () => {
+        try {
+          const audioContext = await ensureAudioContext();
+          const sourceNode = audioContext.createBufferSource();
+          const gainNode = audioContext.createGain();
+          const now = audioContext.currentTime;
+          const safeStart = Math.min(
+            Math.max(0, startTime),
+            Math.max(0, audioBuffer.duration - 0.02),
+          );
+          const safeDuration = Math.min(sliceDuration, audioBuffer.duration - safeStart);
+
+          sourceNode.buffer = audioBuffer;
+          gainNode.gain.setValueAtTime(0.0001, now);
+          gainNode.gain.linearRampToValueAtTime(0.9, now + 0.012);
+          gainNode.gain.setValueAtTime(0.9, now + Math.max(0.024, safeDuration - 0.04));
+          gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
+
+          sourceNode.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+
+          sliceSourceNodeRef.current = sourceNode;
+          sliceGainNodeRef.current = gainNode;
+
+          sourceNode.onended = () => {
+            sourceNode.disconnect();
+            gainNode.disconnect();
+
+            if (sliceSourceNodeRef.current === sourceNode) {
+              sliceSourceNodeRef.current = null;
+            }
+
+            if (sliceGainNodeRef.current === gainNode) {
+              sliceGainNodeRef.current = null;
+            }
+          };
+
+          sourceNode.start(0, safeStart, safeDuration);
+
+          currentBeatIndexRef.current += 1;
+          setPerformanceStep(currentBeatIndexRef.current);
+          setLastTriggeredBeat(startTime);
+          setPerformanceStatus(
+            `Triggered beat ${currentBeatIndexRef.current} of ${beatPositions.length}.`,
+          );
+        } catch (error) {
+          setPerformanceStatus("Unable to play the detected beat slice.");
+          setAudioError(
+            error instanceof Error ? error.message : "Slice playback failed.",
+          );
+        }
+      })();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [analysisResult, analysisState]);
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -503,15 +678,7 @@ function App() {
   };
 
   const handlePause = () => {
-    const audioContext = audioContextRef.current;
-
-    if (!audioContext || !sourceNodeRef.current) {
-      return;
-    }
-
-    pausedAtRef.current = audioContext.currentTime - startedAtRef.current;
-    stopPlayback();
-    setAudioState("paused");
+    pauseTransportPlayback();
   };
 
   const beatPreview = analysisResult?.beatPositions.slice(0, 16) ?? [];
@@ -626,6 +793,27 @@ function App() {
             into beat analysis.
           </p>
         </div>
+
+        <section className="typing-panel" aria-live="polite">
+          <p className="analysis-label">Typing progression</p>
+          <p className="analysis-summary">{performanceStatus}</p>
+
+          <div className="typing-stats">
+            <div className="typing-stat">
+              <p className="typing-stat-label">Current step</p>
+              <p className="typing-stat-value">
+                {performanceStep}/{analysisResult?.beatPositions.length ?? 0}
+              </p>
+            </div>
+
+            <div className="typing-stat">
+              <p className="typing-stat-label">Last beat</p>
+              <p className="typing-stat-value">
+                {lastTriggeredBeat === null ? "--:--" : `${lastTriggeredBeat.toFixed(2)}s`}
+              </p>
+            </div>
+          </div>
+        </section>
 
         <section className="analysis-panel" aria-live="polite">
           <p className="analysis-label">Rhythm analysis</p>
