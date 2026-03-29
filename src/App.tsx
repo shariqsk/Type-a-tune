@@ -29,6 +29,8 @@ type PianoVoice = {
 };
 
 type OutputChain = {
+  context: AudioContext;
+  input: GainNode;
   compressor: DynamicsCompressorNode;
   masterGain: GainNode;
 };
@@ -424,6 +426,7 @@ const buildPromptStream = (startIndex: number, wordCount: number) => {
 };
 
 
+
 const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
   const sampleRate = audioBuffer.sampleRate;
   const channelCount = audioBuffer.numberOfChannels;
@@ -517,6 +520,7 @@ function App() {
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const activePianoVoicesRef = useRef<PianoVoice[]>([]);
   const idleReleaseTimerRef = useRef<number | null>(null);
+  const uiPulseTimerRef = useRef<number | null>(null);
   const performanceClockRef = useRef<PerformanceClock | null>(null);
   const lastPlayedStepIndexRef = useRef<number | null>(null);
   const pendingStepIndexRef = useRef<number | null>(null);
@@ -556,6 +560,7 @@ function App() {
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
+  const [isUiPulseActive, setIsUiPulseActive] = useState(false);
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
@@ -591,8 +596,9 @@ function App() {
   };
 
   const ensureAudioContext = async () => {
-    if (!audioContextRef.current) {
+    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
       audioContextRef.current = new AudioContext();
+      outputChainRef.current = null;
     }
 
     if (audioContextRef.current.state === "suspended") {
@@ -603,27 +609,47 @@ function App() {
   };
 
   const ensureOutputChain = (audioContext: AudioContext) => {
-    if (!outputChainRef.current) {
+    if (!outputChainRef.current || outputChainRef.current.context !== audioContext) {
+      const input = audioContext.createGain();
       const compressor = audioContext.createDynamicsCompressor();
       const masterGain = audioContext.createGain();
 
-      compressor.threshold.setValueAtTime(-20, audioContext.currentTime);
-      compressor.knee.setValueAtTime(18, audioContext.currentTime);
-      compressor.ratio.setValueAtTime(3.2, audioContext.currentTime);
-      compressor.attack.setValueAtTime(0.004, audioContext.currentTime);
-      compressor.release.setValueAtTime(0.16, audioContext.currentTime);
+      input.gain.setValueAtTime(1, audioContext.currentTime);
+      compressor.threshold.setValueAtTime(-18, audioContext.currentTime);
+      compressor.knee.setValueAtTime(16, audioContext.currentTime);
+      compressor.ratio.setValueAtTime(2.8, audioContext.currentTime);
+      compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
+      compressor.release.setValueAtTime(0.14, audioContext.currentTime);
       masterGain.gain.setValueAtTime(0.9, audioContext.currentTime);
 
+      input.connect(compressor);
       compressor.connect(masterGain);
       masterGain.connect(audioContext.destination);
 
       outputChainRef.current = {
+        context: audioContext,
+        input,
         compressor,
         masterGain,
       };
     }
 
-    return outputChainRef.current.compressor;
+    return outputChainRef.current;
+  };
+
+  const triggerUiPulse = () => {
+    if (uiPulseTimerRef.current !== null) {
+      window.clearTimeout(uiPulseTimerRef.current);
+    }
+
+    setIsUiPulseActive(false);
+    window.requestAnimationFrame(() => {
+      setIsUiPulseActive(true);
+      uiPulseTimerRef.current = window.setTimeout(() => {
+        setIsUiPulseActive(false);
+        uiPulseTimerRef.current = null;
+      }, 420);
+    });
   };
 
   const stopPlayback = () => {
@@ -727,7 +753,7 @@ function App() {
   ) => {
     const sourceNode = audioContext.createBufferSource();
     const gainNode = audioContext.createGain();
-    const outputNode = ensureOutputChain(audioContext);
+    const outputChain = ensureOutputChain(audioContext);
     const now = audioContext.currentTime;
     const nextTime =
       stepPositions[beatIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.52);
@@ -754,10 +780,10 @@ function App() {
       paced ? 0.48 : 0.54,
       now + Math.max(paced ? 0.28 : 0.12, safeDuration - (paced ? 0.28 : 0.12)),
     );
-    gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + safeDuration + 0.04);
 
     sourceNode.connect(gainNode);
-    gainNode.connect(outputNode);
+    gainNode.connect(outputChain.input);
 
     const activeVoice: PianoVoice = {
       gain: gainNode,
@@ -788,7 +814,7 @@ function App() {
   ) => {
     const tone = analyzeStepTone(audioBuffer, startTime);
     const now = audioContext.currentTime;
-    const outputNode = ensureOutputChain(audioContext);
+    const outputChain = ensureOutputChain(audioContext);
     const nextTime =
       stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.72);
     const noteDuration = paced
@@ -809,12 +835,12 @@ function App() {
     const noteGains: GainNode[] = [];
 
     masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.58 * tone.velocity, now + 0.024);
+    masterGain.gain.linearRampToValueAtTime(0.56 * tone.velocity, now + 0.028);
     masterGain.gain.exponentialRampToValueAtTime(
       Math.max(0.072, 0.13 * tone.velocity),
-      now + (paced ? 0.55 : 0.38),
+      now + (paced ? 0.62 : 0.44),
     );
-    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration + 0.08);
 
     toneFilter.type = "lowpass";
     toneFilter.frequency.setValueAtTime(2200 + tone.velocity * 1800, now);
@@ -861,7 +887,7 @@ function App() {
 
     toneFilter.connect(masterGain);
     hammerGain.connect(masterGain);
-    masterGain.connect(outputNode);
+    masterGain.connect(outputChain.input);
 
     for (const oscillator of oscillators) {
       oscillator.start(now);
@@ -901,7 +927,7 @@ function App() {
     audioBuffer: AudioBuffer | null,
     referenceTime: number | null,
   ) => {
-    const outputNode = ensureOutputChain(audioContext);
+    const outputChain = ensureOutputChain(audioContext);
     const now = audioContext.currentTime;
     const referenceTone =
       audioBuffer && referenceTime !== null
@@ -948,7 +974,7 @@ function App() {
     });
 
     filter.connect(masterGain);
-    masterGain.connect(outputNode);
+    masterGain.connect(outputChain.input);
 
     for (let index = 0; index < oscillators.length; index += 1) {
       const startOffset = Math.floor(index / 2) * 0.012;
@@ -1003,7 +1029,7 @@ function App() {
     stepIndex: number,
   ) => {
     const now = audioContext.currentTime;
-    const outputNode = ensureOutputChain(audioContext);
+    const outputChain = ensureOutputChain(audioContext);
 
     if (mode === "slices") {
       const previousStepStart =
@@ -1053,7 +1079,7 @@ function App() {
 
       sourceNode.connect(filter);
       filter.connect(gainNode);
-      gainNode.connect(outputNode);
+      gainNode.connect(outputChain.input);
 
       const activeVoice: PianoVoice = {
         gain: gainNode,
@@ -1143,7 +1169,7 @@ function App() {
 
     toneFilter.connect(masterGain);
     hammerGain.connect(masterGain);
-    masterGain.connect(outputNode);
+    masterGain.connect(outputChain.input);
 
     for (let index = 0; index < oscillators.length; index += 1) {
       const startOffset = Math.floor(index / 3) * 0.018;
@@ -1443,9 +1469,14 @@ function App() {
   useEffect(() => {
     return () => {
       clearIdleRelease();
+      if (uiPulseTimerRef.current !== null) {
+        window.clearTimeout(uiPulseTimerRef.current);
+      }
       stopPlayback();
       stopSlicePlayback();
       void audioContextRef.current?.close();
+      audioContextRef.current = null;
+      outputChainRef.current = null;
     };
   }, []);
 
@@ -1524,6 +1555,7 @@ function App() {
         if (isGameActive) {
           setPromptCursor((currentCursor) => Math.max(0, currentCursor - 1));
         }
+        triggerUiPulse();
         setAudioError(null);
         setPerformanceStatus(
           `Rewound to step ${rewoundIndex} of ${stepPositions.length}.`,
@@ -1599,6 +1631,7 @@ function App() {
             setPromptCursor((currentCursor) => Math.max(0, currentCursor - 1));
           }
           setLastPianoNote("Mistake cue");
+          triggerUiPulse();
           setPerformanceStatus(
             expectedCharacter
               ? `Mistake: expected ${expectedCharacter === " " ? "space" : `"${expectedCharacter}"`}.`
@@ -1646,6 +1679,7 @@ function App() {
 
       if (paceLockEnabled && isDuplicateStep) {
         setLastTriggeredBeat(startTime);
+        triggerUiPulse();
         scheduleIdleRelease();
         setPerformanceStatus(
           `Holding step ${stepIndexToPlay + 1} of ${stepPositions.length} at the song's pace.`,
@@ -1701,6 +1735,7 @@ function App() {
           }
           setLastTriggeredBeat(startTime);
           setLastPianoNote(playedLabel);
+          triggerUiPulse();
           setAudioError(null);
           setPerformanceStatus(
             shouldAdvanceStep
@@ -1753,9 +1788,10 @@ function App() {
     }
 
     const audioContext = await ensureAudioContext();
+    const outputChain = ensureOutputChain(audioContext);
     const sourceNode = audioContext.createBufferSource();
     sourceNode.buffer = audioBuffer;
-    sourceNode.connect(audioContext.destination);
+    sourceNode.connect(outputChain.input);
     sourceNodeRef.current = sourceNode;
     startedAtRef.current = audioContext.currentTime - pausedAtRef.current;
     manualStopRef.current = false;
@@ -1785,8 +1821,8 @@ function App() {
   const peakPreview = analysisResult?.energyPeaks.slice(0, 12) ?? [];
 
   return (
-    <main className="shell">
-      <section className="hero">
+    <main className="shell shell-ready">
+      <section className="hero hero-ready">
         <p className="eyebrow">Type-a-tune</p>
         <h1>Drop a song or start typing</h1>
         <p className="subtitle">
@@ -1796,7 +1832,9 @@ function App() {
 
       <section
         ref={dropzoneRef}
-        className={`dropzone ${isDragActive ? "dropzone-active" : ""}`}
+        className={`dropzone ${isDragActive ? "dropzone-active" : ""} ${
+          isUiPulseActive ? "dropzone-pulse" : ""
+        }`}
         onDragEnter={(event) => {
           event.preventDefault();
           handleDragState(true);
@@ -1901,7 +1939,10 @@ function App() {
           </p>
         </div>
 
-        <section className="typing-panel" aria-live="polite">
+        <section
+          className={`typing-panel ${isUiPulseActive ? "typing-panel-pulse" : ""}`}
+          aria-live="polite"
+        >
           <p className="analysis-label">Typing progression</p>
           <p className="analysis-summary">{performanceStatus}</p>
 
