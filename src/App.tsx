@@ -15,6 +15,11 @@ type AnalysisResult = {
   energyPeaks: number[];
 };
 
+type SliceVoice = {
+  source: AudioBufferSourceNode;
+  gain: GainNode;
+};
+
 const MIN_BPM = 70;
 const MAX_BPM = 170;
 
@@ -204,6 +209,36 @@ const analyzeAudioBuffer = (audioBuffer: AudioBuffer): AnalysisResult => {
   };
 };
 
+const createPlayableStepMap = (analysisResult: AnalysisResult | null) => {
+  if (!analysisResult) {
+    return [];
+  }
+
+  const sourcePositions =
+    analysisResult.beatPositions.length > 0
+      ? analysisResult.beatPositions
+      : analysisResult.energyPeaks;
+
+  if (sourcePositions.length === 0) {
+    return [];
+  }
+
+  const beatInterval = analysisResult.bpm ? 60 / analysisResult.bpm : 0.5;
+  const minGap = Math.max(0.34, Math.min(0.48, beatInterval * 1.15));
+  const playableSteps: number[] = [sourcePositions[0]];
+
+  for (let index = 1; index < sourcePositions.length; index += 1) {
+    const candidate = sourcePositions[index];
+    const previous = playableSteps[playableSteps.length - 1];
+
+    if (candidate - previous >= minGap) {
+      playableSteps.push(candidate);
+    }
+  }
+
+  return playableSteps.map((time) => Number(time.toFixed(3)));
+};
+
 const isTypingPerformanceKey = (event: KeyboardEvent) => {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
     return false;
@@ -231,8 +266,7 @@ function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
-  const sliceSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
-  const sliceGainNodeRef = useRef<GainNode | null>(null);
+  const activeSliceVoicesRef = useRef<SliceVoice[]>([]);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
   const manualStopRef = useRef(false);
@@ -251,6 +285,7 @@ function App() {
   >("idle");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [playableSteps, setPlayableSteps] = useState<number[]>([]);
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [performanceStatus, setPerformanceStatus] = useState(
@@ -298,19 +333,13 @@ function App() {
   };
 
   const stopSlicePlayback = () => {
-    const sliceSourceNode = sliceSourceNodeRef.current;
-    const sliceGainNode = sliceGainNodeRef.current;
-
-    if (sliceSourceNode) {
-      sliceSourceNode.stop();
-      sliceSourceNode.disconnect();
-      sliceSourceNodeRef.current = null;
+    for (const voice of activeSliceVoicesRef.current) {
+      voice.source.stop();
+      voice.source.disconnect();
+      voice.gain.disconnect();
     }
 
-    if (sliceGainNode) {
-      sliceGainNode.disconnect();
-      sliceGainNodeRef.current = null;
-    }
+    activeSliceVoicesRef.current = [];
   };
 
   const pauseTransportPlayback = () => {
@@ -436,6 +465,7 @@ function App() {
         setAudioState("idle");
         setTrackDuration(null);
         setAudioError(null);
+        setPlayableSteps([]);
         return;
       }
 
@@ -451,6 +481,7 @@ function App() {
       setAudioState("loading");
       setTrackDuration(null);
       setAudioError(null);
+      setPlayableSteps([]);
 
       try {
         const audioContext = await ensureAudioContext();
@@ -504,6 +535,7 @@ function App() {
       setAnalysisState("idle");
       setAnalysisError(null);
       setAnalysisResult(null);
+      setPlayableSteps([]);
       currentBeatIndexRef.current = 0;
       setPerformanceStep(0);
       setLastTriggeredBeat(null);
@@ -517,14 +549,16 @@ function App() {
     const runAnalysis = () => {
       try {
         const result = analyzeAudioBuffer(decodedAudioBuffer);
+        const nextPlayableSteps = createPlayableStepMap(result);
         setAnalysisResult(result);
+        setPlayableSteps(nextPlayableSteps);
         setAnalysisState("ready");
         currentBeatIndexRef.current = 0;
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
         setPerformanceStatus(
-          result.beatPositions.length > 0
-            ? "Typing mode is ready. Press any key to advance to the next beat."
+          nextPlayableSteps.length > 0
+            ? "Typing mode is ready. Press any key to advance through the playable step map."
             : "No reliable beats were detected for typing progression yet.",
         );
 
@@ -533,6 +567,7 @@ function App() {
       } catch (error) {
         setAnalysisState("error");
         setAnalysisResult(null);
+        setPlayableSteps([]);
         setAnalysisError(
           error instanceof Error ? error.message : "Unable to analyze the selected song.",
         );
@@ -557,31 +592,32 @@ function App() {
       }
 
       const audioBuffer = audioBufferRef.current;
-      const beatPositions = analysisResult?.beatPositions ?? [];
+      const stepPositions = playableSteps;
 
-      if (!audioBuffer || beatPositions.length === 0 || analysisState !== "ready") {
+      if (!audioBuffer || stepPositions.length === 0 || analysisState !== "ready") {
         return;
       }
 
       const beatIndex = currentBeatIndexRef.current;
 
-      if (beatIndex >= beatPositions.length) {
+      if (beatIndex >= stepPositions.length) {
         event.preventDefault();
-        setPerformanceStatus("Reached the end of the detected beat map.");
+        setPerformanceStatus("Reached the end of the playable step map.");
         return;
       }
 
       event.preventDefault();
       pauseTransportPlayback();
-      stopSlicePlayback();
 
-      const startTime = beatPositions[beatIndex];
+      const startTime = stepPositions[beatIndex];
       const nextTime =
-        beatPositions[beatIndex + 1] ??
-        Math.min(audioBuffer.duration, startTime + 0.28);
+        stepPositions[beatIndex + 1] ??
+        Math.min(audioBuffer.duration, startTime + 0.52);
+      const previewLead = 0.012;
+      const sliceStart = Math.max(0, startTime - previewLead);
       const sliceDuration = Math.max(
-        0.1,
-        Math.min(0.42, Math.max(nextTime - startTime, 0.16)),
+        0.18,
+        Math.min(0.52, Math.max(nextTime - sliceStart, 0.26)),
       );
 
       void (async () => {
@@ -591,34 +627,31 @@ function App() {
           const gainNode = audioContext.createGain();
           const now = audioContext.currentTime;
           const safeStart = Math.min(
-            Math.max(0, startTime),
+            Math.max(0, sliceStart),
             Math.max(0, audioBuffer.duration - 0.02),
           );
           const safeDuration = Math.min(sliceDuration, audioBuffer.duration - safeStart);
 
           sourceNode.buffer = audioBuffer;
+          gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0.0001, now);
-          gainNode.gain.linearRampToValueAtTime(0.9, now + 0.012);
-          gainNode.gain.setValueAtTime(0.9, now + Math.max(0.024, safeDuration - 0.04));
+          gainNode.gain.linearRampToValueAtTime(0.72, now + 0.008);
+          gainNode.gain.setValueAtTime(
+            0.72,
+            now + Math.max(0.02, safeDuration - 0.06),
+          );
           gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
 
           sourceNode.connect(gainNode);
           gainNode.connect(audioContext.destination);
-
-          sliceSourceNodeRef.current = sourceNode;
-          sliceGainNodeRef.current = gainNode;
+          activeSliceVoicesRef.current.push({ source: sourceNode, gain: gainNode });
 
           sourceNode.onended = () => {
             sourceNode.disconnect();
             gainNode.disconnect();
-
-            if (sliceSourceNodeRef.current === sourceNode) {
-              sliceSourceNodeRef.current = null;
-            }
-
-            if (sliceGainNodeRef.current === gainNode) {
-              sliceGainNodeRef.current = null;
-            }
+            activeSliceVoicesRef.current = activeSliceVoicesRef.current.filter(
+              (voice) => voice.source !== sourceNode,
+            );
           };
 
           sourceNode.start(0, safeStart, safeDuration);
@@ -626,8 +659,9 @@ function App() {
           currentBeatIndexRef.current += 1;
           setPerformanceStep(currentBeatIndexRef.current);
           setLastTriggeredBeat(startTime);
+          setAudioError(null);
           setPerformanceStatus(
-            `Triggered beat ${currentBeatIndexRef.current} of ${beatPositions.length}.`,
+            `Triggered step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
           );
         } catch (error) {
           setPerformanceStatus("Unable to play the detected beat slice.");
@@ -643,7 +677,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [analysisResult, analysisState]);
+  }, [analysisState, playableSteps]);
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -766,6 +800,9 @@ function App() {
               <p className="status-meta">
                 Web Audio buffer: {audioState} • {formatTime(trackDuration)}
               </p>
+              <p className="status-meta">
+                Playable steps: {playableSteps.length}
+              </p>
             </>
           ) : (
             <p className="status-placeholder">No song selected yet.</p>
@@ -802,7 +839,7 @@ function App() {
             <div className="typing-stat">
               <p className="typing-stat-label">Current step</p>
               <p className="typing-stat-value">
-                {performanceStep}/{analysisResult?.beatPositions.length ?? 0}
+                {performanceStep}/{playableSteps.length}
               </p>
             </div>
 
