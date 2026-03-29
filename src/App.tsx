@@ -379,7 +379,7 @@ function App() {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [playableSteps, setPlayableSteps] = useState<number[]>([]);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("piano");
-  const [paceLockAmount, setPaceLockAmount] = useState(0);
+  const [isPaceLocked, setIsPaceLocked] = useState(false);
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
@@ -495,7 +495,7 @@ function App() {
   const canAcceptTriggerBurst = () => {
     const now = Date.now();
 
-    if (now - lastTriggerAtRef.current < 45) {
+    if (now - lastTriggerAtRef.current < 12) {
       return false;
     }
 
@@ -1366,7 +1366,7 @@ function App() {
         return;
       }
 
-      const paceLockEnabled = paceLockAmount >= 50;
+      const paceLockEnabled = isPaceLocked;
       let stepIndexToPlay = beatIndex;
       let startTime = stepPositions[beatIndex];
 
@@ -1448,7 +1448,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [analysisState, playableSteps, playbackMode, paceLockAmount]);
+  }, [analysisState, playableSteps, playbackMode, isPaceLocked]);
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -1627,19 +1627,24 @@ function App() {
             <label className="pace-label" htmlFor="pace-lock">
               Pace control
             </label>
-            <input
-              id="pace-lock"
-              className="pace-slider"
-              type="range"
-              min="0"
-              max="100"
-              step="100"
-              value={paceLockAmount}
-              onChange={(event) => setPaceLockAmount(Number(event.currentTarget.value))}
-            />
-            <div className="pace-legend">
-              <span>Follow typing</span>
-              <span>Keep song pace</span>
+            <div className="pace-toggle-row">
+              <span className={`pace-option ${!isPaceLocked ? "pace-option-active" : ""}`}>
+                Follow typing
+              </span>
+              <button
+                id="pace-lock"
+                className={`pace-toggle ${isPaceLocked ? "pace-toggle-active" : ""}`}
+                type="button"
+                role="switch"
+                aria-checked={isPaceLocked}
+                aria-label="Keep song pace"
+                onClick={() => setIsPaceLocked((value) => !value)}
+              >
+                <span className="pace-toggle-knob" />
+              </button>
+              <span className={`pace-option ${isPaceLocked ? "pace-option-active" : ""}`}>
+                Keep song pace
+              </span>
             </div>
           </div>
 
