@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
@@ -561,6 +562,7 @@ function App() {
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
   const [isUiPulseActive, setIsUiPulseActive] = useState(false);
+  const [backgroundMode, setBackgroundMode] = useState(false);
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
@@ -1513,8 +1515,12 @@ function App() {
   }, [gameSourceMode]);
 
   useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (isRewindKey(event)) {
+    void invoke("set_background_mode", { enabled: backgroundMode });
+  }, [backgroundMode]);
+
+  useEffect(() => {
+    const processKey = (key: string) => {
+      if (key === "Backspace") {
         const audioBuffer = audioBufferRef.current;
         const stepPositions = playableSteps;
 
@@ -1522,7 +1528,6 @@ function App() {
           return;
         }
 
-        event.preventDefault();
         pauseTransportPlayback();
         clearIdleRelease();
 
@@ -1583,9 +1588,8 @@ function App() {
         return;
       }
 
-      if (!isTypingPerformanceKey(event)) {
-        return;
-      }
+      const isTyping = key.length === 1 || key === " " || key === "Enter";
+      if (!isTyping) return;
 
       const audioBuffer = audioBufferRef.current;
       const stepPositions = playableSteps;
@@ -1597,12 +1601,10 @@ function App() {
       const beatIndex = currentBeatIndexRef.current;
 
       if (beatIndex >= stepPositions.length) {
-        event.preventDefault();
         setPerformanceStatus("Reached the end of the playable step map.");
         return;
       }
 
-      event.preventDefault();
       pauseTransportPlayback();
       clearIdleRelease();
 
@@ -1610,7 +1612,8 @@ function App() {
         return;
       }
 
-      const typedCharacter = getTypedCharacter(event);
+      const typedCharacter =
+        key === "Enter" || key === " " ? " " : key.toLowerCase();
       const expectedCharacter = activePrompt[promptCursor]?.toLowerCase() ?? "";
 
       if (isGameActive && typedCharacter) {
@@ -1763,10 +1766,38 @@ function App() {
       })();
     };
 
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isRewindKey(event)) {
+        event.preventDefault();
+        processKey("Backspace");
+        return;
+      }
+      if (!isTypingPerformanceKey(event)) return;
+      event.preventDefault();
+      processKey(event.key);
+    };
+
     window.addEventListener("keydown", handleKeyDown);
+
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    if (backgroundMode) {
+      void listen<string>("global-keydown", (event) => {
+        processKey(event.payload);
+      }).then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      });
+    }
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      cancelled = true;
+      unlisten?.();
     };
   }, [
     analysisState,
@@ -1778,6 +1809,7 @@ function App() {
     promptCursor,
     mistakeMode,
     isGameActive,
+    backgroundMode,
   ]);
 
   const handlePlay = async () => {
@@ -2039,6 +2071,36 @@ function App() {
               <span className={mistakeMode === "normal" ? "feel-label-active" : ""}>Normal</span>
               <span className={mistakeMode === "strict" ? "feel-label-active" : ""}>Strict</span>
             </div>
+          </div>
+
+          <div className="pace-panel">
+            <label className="pace-label" htmlFor="background-mode">
+              Background typing
+            </label>
+            <div className="pace-toggle-row">
+              <span className={`pace-option ${!backgroundMode ? "pace-option-active" : ""}`}>
+                App focused only
+              </span>
+              <button
+                id="background-mode"
+                className={`pace-toggle ${backgroundMode ? "pace-toggle-active" : ""}`}
+                type="button"
+                role="switch"
+                aria-checked={backgroundMode}
+                aria-label="Background typing mode"
+                onClick={() => setBackgroundMode((value) => !value)}
+              >
+                <span className="pace-toggle-knob" />
+              </button>
+              <span className={`pace-option ${backgroundMode ? "pace-option-active" : ""}`}>
+                Any window
+              </span>
+            </div>
+            {backgroundMode && (
+              <p className="prompt-caption">
+                Typing anywhere triggers sounds. Grant accessibility/input monitoring permissions if prompted.
+              </p>
+            )}
           </div>
 
           <div className="feel-panel">
