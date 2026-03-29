@@ -358,6 +358,7 @@ function App() {
   const activePianoVoicesRef = useRef<PianoVoice[]>([]);
   const idleReleaseTimerRef = useRef<number | null>(null);
   const performanceClockRef = useRef<PerformanceClock | null>(null);
+  const lastPlayedStepIndexRef = useRef<number | null>(null);
   const lastTriggerAtRef = useRef(0);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
@@ -480,6 +481,7 @@ function App() {
 
   const resetPerformanceClock = () => {
     performanceClockRef.current = null;
+    lastPlayedStepIndexRef.current = null;
   };
 
   const findPacedStepIndex = (stepPositions: number[], songTime: number) => {
@@ -495,7 +497,7 @@ function App() {
   const canAcceptTriggerBurst = () => {
     const now = Date.now();
 
-    if (now - lastTriggerAtRef.current < 12) {
+    if (now - lastTriggerAtRef.current < 18) {
       return false;
     }
 
@@ -509,6 +511,7 @@ function App() {
     startTime: number,
     stepPositions: number[],
     beatIndex: number,
+    paced: boolean,
   ) => {
     const sourceNode = audioContext.createBufferSource();
     const gainNode = audioContext.createGain();
@@ -518,8 +521,8 @@ function App() {
     const previewLead = 0.012;
     const sliceStart = Math.max(0, startTime - previewLead);
     const sliceDuration = Math.max(
-      0.18,
-      Math.min(0.52, Math.max(nextTime - sliceStart, 0.26)),
+      paced ? 0.42 : 0.18,
+      Math.min(paced ? 0.98 : 0.52, Math.max(nextTime - sliceStart + (paced ? 0.08 : 0), 0.26)),
     );
     const safeStart = Math.min(
       Math.max(0, sliceStart),
@@ -531,7 +534,10 @@ function App() {
     gainNode.gain.cancelScheduledValues(now);
     gainNode.gain.setValueAtTime(0.0001, now);
     gainNode.gain.linearRampToValueAtTime(0.72, now + 0.008);
-    gainNode.gain.setValueAtTime(0.72, now + Math.max(0.02, safeDuration - 0.06));
+    gainNode.gain.setValueAtTime(
+      0.72,
+      now + Math.max(paced ? 0.12 : 0.02, safeDuration - (paced ? 0.14 : 0.06)),
+    );
     gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
 
     sourceNode.connect(gainNode);
@@ -560,10 +566,17 @@ function App() {
     audioContext: AudioContext,
     audioBuffer: AudioBuffer,
     startTime: number,
+    stepPositions: number[],
+    stepIndex: number,
+    paced: boolean,
   ) => {
     const tone = analyzeStepTone(audioBuffer, startTime);
     const now = audioContext.currentTime;
-    const noteDuration = 1.2;
+    const nextTime =
+      stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.72);
+    const noteDuration = paced
+      ? Math.max(0.72, Math.min(1.85, nextTime - startTime + 0.24))
+      : 1.2;
     const fundamental = midiToFrequency(tone.midi);
     const chordMidis =
       tone.velocity > 0.62
@@ -582,7 +595,7 @@ function App() {
     masterGain.gain.linearRampToValueAtTime(0.78 * tone.velocity, now + 0.01);
     masterGain.gain.exponentialRampToValueAtTime(
       Math.max(0.08, 0.18 * tone.velocity),
-      now + 0.22,
+      now + (paced ? 0.34 : 0.22),
     );
     masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
 
@@ -1221,6 +1234,7 @@ function App() {
       setAnalysisResult(null);
       setPlayableSteps([]);
       currentBeatIndexRef.current = 0;
+      lastPlayedStepIndexRef.current = null;
       clearIdleRelease();
       resetPerformanceClock();
       setPerformanceStep(0);
@@ -1241,6 +1255,7 @@ function App() {
         setPlayableSteps(nextPlayableSteps);
         setAnalysisState("ready");
         currentBeatIndexRef.current = 0;
+        lastPlayedStepIndexRef.current = null;
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
         setLastPianoNote("--");
@@ -1307,6 +1322,7 @@ function App() {
           songStartTime: rewoundBeat,
           wallStartTime: Date.now(),
         };
+        lastPlayedStepIndexRef.current = null;
 
         currentBeatIndexRef.current = rewoundIndex;
         setPerformanceStep(rewoundIndex);
@@ -1369,6 +1385,7 @@ function App() {
       const paceLockEnabled = isPaceLocked;
       let stepIndexToPlay = beatIndex;
       let startTime = stepPositions[beatIndex];
+      let shouldAdvanceStep = true;
 
       if (paceLockEnabled) {
         if (!performanceClockRef.current) {
@@ -1386,8 +1403,8 @@ function App() {
         stepIndexToPlay = findPacedStepIndex(stepPositions, targetSongTime);
 
         if (stepIndexToPlay < currentBeatIndexRef.current) {
-          setPerformanceStatus("Waiting for the song timeline to reach the next step.");
-          return;
+          stepIndexToPlay = Math.max(0, currentBeatIndexRef.current - 1);
+          shouldAdvanceStep = false;
         }
 
         startTime = stepPositions[stepIndexToPlay];
@@ -1395,20 +1412,37 @@ function App() {
         resetPerformanceClock();
       }
 
-      currentBeatIndexRef.current = Math.max(
-        currentBeatIndexRef.current,
-        stepIndexToPlay + 1,
-      );
-      setPerformanceStep(currentBeatIndexRef.current);
+      if (shouldAdvanceStep) {
+        currentBeatIndexRef.current = Math.max(
+          currentBeatIndexRef.current,
+          stepIndexToPlay + 1,
+        );
+        setPerformanceStep(currentBeatIndexRef.current);
+      }
 
       void (async () => {
         try {
           const audioContext = await ensureAudioContext();
+
+          if (paceLockEnabled && lastPlayedStepIndexRef.current === stepIndexToPlay) {
+            setPerformanceStatus(
+              `Holding step ${currentBeatIndexRef.current} at the song's pace.`,
+            );
+            return;
+          }
+
           duckActiveVoices(audioContext);
           let playedLabel = "Song slice";
 
           if (playbackMode === "piano") {
-            playedLabel = await playPianoStep(audioContext, audioBuffer, startTime);
+            playedLabel = await playPianoStep(
+              audioContext,
+              audioBuffer,
+              startTime,
+              stepPositions,
+              stepIndexToPlay,
+              paceLockEnabled,
+            );
           } else {
             await playRawSliceStep(
               audioContext,
@@ -1416,14 +1450,18 @@ function App() {
               startTime,
               stepPositions,
               stepIndexToPlay,
+              paceLockEnabled,
             );
           }
 
+          lastPlayedStepIndexRef.current = stepIndexToPlay;
           setLastTriggeredBeat(startTime);
           setLastPianoNote(playedLabel);
           setAudioError(null);
           setPerformanceStatus(
-            `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
+            shouldAdvanceStep
+              ? `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`
+              : `Held ${playedLabel} at step ${currentBeatIndexRef.current} until the song timeline advances.`,
           );
           scheduleIdleRelease(playbackMode, startTime, stepPositions, stepIndexToPlay);
         } catch (error) {
