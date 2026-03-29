@@ -9,6 +9,201 @@ type UploadedSong = {
   file?: File;
 };
 
+type AnalysisResult = {
+  bpm: number | null;
+  beatPositions: number[];
+  energyPeaks: number[];
+};
+
+const MIN_BPM = 70;
+const MAX_BPM = 170;
+
+const normalizeBpm = (value: number) => {
+  let bpm = value;
+
+  while (bpm < MIN_BPM) {
+    bpm *= 2;
+  }
+
+  while (bpm > MAX_BPM) {
+    bpm /= 2;
+  }
+
+  return bpm;
+};
+
+const analyzeAudioBuffer = (audioBuffer: AudioBuffer): AnalysisResult => {
+  const frameSize = 2048;
+  const hopSize = 1024;
+  const minPeakGapSeconds = 0.18;
+  const channelCount = audioBuffer.numberOfChannels;
+  const frameCount = Math.max(
+    0,
+    Math.floor((audioBuffer.length - frameSize) / hopSize) + 1,
+  );
+
+  if (frameCount === 0) {
+    return { bpm: null, beatPositions: [], energyPeaks: [] };
+  }
+
+  const channelData = Array.from({ length: channelCount }, (_, index) =>
+    audioBuffer.getChannelData(index),
+  );
+  const energies = new Array<number>(frameCount);
+  const frameDuration = hopSize / audioBuffer.sampleRate;
+
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    const start = frameIndex * hopSize;
+    let energy = 0;
+
+    for (let sampleIndex = 0; sampleIndex < frameSize; sampleIndex += 1) {
+      let mixedSample = 0;
+
+      for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+        mixedSample += channelData[channelIndex][start + sampleIndex] ?? 0;
+      }
+
+      const monoSample = mixedSample / channelCount;
+      energy += monoSample * monoSample;
+    }
+
+    energies[frameIndex] = Math.sqrt(energy / frameSize);
+  }
+
+  const maxEnergy = Math.max(...energies, 1e-6);
+  const normalized = energies.map((value) => value / maxEnergy);
+  const mean =
+    normalized.reduce((sum, value) => sum + value, 0) / normalized.length;
+  const variance =
+    normalized.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+    normalized.length;
+  const standardDeviation = Math.sqrt(variance);
+  const threshold = Math.min(0.95, mean + standardDeviation * 0.9);
+  const minPeakGapFrames = Math.max(1, Math.round(minPeakGapSeconds / frameDuration));
+
+  const detectedPeaks: Array<{ time: number; energy: number }> = [];
+
+  for (let index = 1; index < normalized.length - 1; index += 1) {
+    const current = normalized[index];
+
+    if (
+      current < threshold ||
+      current < normalized[index - 1] ||
+      current < normalized[index + 1]
+    ) {
+      continue;
+    }
+
+    const time = index * frameDuration;
+    const previousPeak = detectedPeaks[detectedPeaks.length - 1];
+
+    if (!previousPeak) {
+      detectedPeaks.push({ time, energy: current });
+      continue;
+    }
+
+    const previousPeakFrame = Math.round(previousPeak.time / frameDuration);
+
+    if (index - previousPeakFrame < minPeakGapFrames) {
+      if (current > previousPeak.energy) {
+        previousPeak.time = time;
+        previousPeak.energy = current;
+      }
+
+      continue;
+    }
+
+    detectedPeaks.push({ time, energy: current });
+  }
+
+  const histogram = new Map<number, number>();
+
+  for (let peakIndex = 0; peakIndex < detectedPeaks.length; peakIndex += 1) {
+    const currentPeak = detectedPeaks[peakIndex];
+
+    for (
+      let intervalIndex = peakIndex + 1;
+      intervalIndex < Math.min(detectedPeaks.length, peakIndex + 9);
+      intervalIndex += 1
+    ) {
+      const delta = detectedPeaks[intervalIndex].time - currentPeak.time;
+
+      if (delta <= 0.2) {
+        continue;
+      }
+
+      const bpmBucket = Math.round(normalizeBpm(60 / delta));
+      const weight = currentPeak.energy + detectedPeaks[intervalIndex].energy;
+      histogram.set(bpmBucket, (histogram.get(bpmBucket) ?? 0) + weight);
+    }
+  }
+
+  let bpm: number | null = null;
+  let bestWeight = 0;
+
+  for (const [candidateBpm, weight] of histogram.entries()) {
+    const neighborhoodWeight =
+      (histogram.get(candidateBpm - 1) ?? 0) +
+      weight +
+      (histogram.get(candidateBpm + 1) ?? 0);
+
+    if (neighborhoodWeight > bestWeight) {
+      bpm = candidateBpm;
+      bestWeight = neighborhoodWeight;
+    }
+  }
+
+  const energyPeaks = detectedPeaks.map((peak) => peak.time);
+
+  if (!bpm || energyPeaks.length === 0) {
+    return {
+      bpm,
+      beatPositions: energyPeaks,
+      energyPeaks,
+    };
+  }
+
+  const beatInterval = 60 / bpm;
+  const tolerance = Math.min(0.12, beatInterval * 0.3);
+  const seedPeak =
+    detectedPeaks.find((peak) => peak.time > 1 && peak.time < 8) ?? detectedPeaks[0];
+  const beatPositions: number[] = [];
+
+  for (
+    let predicted = seedPeak.time;
+    predicted >= 0;
+    predicted -= beatInterval
+  ) {
+    const nearbyPeak = detectedPeaks.find(
+      (peak) => Math.abs(peak.time - predicted) <= tolerance,
+    );
+    beatPositions.unshift(
+      Number((nearbyPeak?.time ?? Math.max(0, predicted)).toFixed(3)),
+    );
+  }
+
+  for (
+    let predicted = seedPeak.time + beatInterval;
+    predicted <= audioBuffer.duration;
+    predicted += beatInterval
+  ) {
+    const nearbyPeak = detectedPeaks.find(
+      (peak) => Math.abs(peak.time - predicted) <= tolerance,
+    );
+    beatPositions.push(Number((nearbyPeak?.time ?? predicted).toFixed(3)));
+  }
+
+  const dedupedBeatPositions = beatPositions.filter((time, index, array) => {
+    return index === 0 || Math.abs(time - array[index - 1]) > 0.05;
+  });
+
+  return {
+    bpm,
+    beatPositions: dedupedBeatPositions,
+    energyPeaks: energyPeaks.map((time) => Number(time.toFixed(3))),
+  };
+};
+
 function App() {
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -21,11 +216,17 @@ function App() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [decodedAudioBuffer, setDecodedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioState, setAudioState] = useState<
     "idle" | "loading" | "ready" | "playing" | "paused"
   >("idle");
   const [trackDuration, setTrackDuration] = useState<number | null>(null);
+  const [analysisState, setAnalysisState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
 
   const handleDragState = (isActive: boolean) => {
     setIsDragActive(isActive);
@@ -168,6 +369,7 @@ function App() {
       if (!uploadedSong) {
         stopPlayback();
         audioBufferRef.current = null;
+        setDecodedAudioBuffer(null);
         pausedAtRef.current = 0;
         setAudioState("idle");
         setTrackDuration(null);
@@ -177,6 +379,7 @@ function App() {
 
       stopPlayback();
       audioBufferRef.current = null;
+      setDecodedAudioBuffer(null);
       pausedAtRef.current = 0;
       setAudioState("loading");
       setTrackDuration(null);
@@ -204,6 +407,7 @@ function App() {
         }
 
         audioBufferRef.current = decodedBuffer;
+        setDecodedAudioBuffer(decodedBuffer);
         setTrackDuration(decodedBuffer.duration);
         setAudioState("ready");
       } catch (error) {
@@ -212,6 +416,7 @@ function App() {
         }
 
         audioBufferRef.current = null;
+        setDecodedAudioBuffer(null);
         setTrackDuration(null);
         setAudioState("idle");
         setAudioError(
@@ -226,6 +431,37 @@ function App() {
       cancelled = true;
     };
   }, [uploadedSong]);
+
+  useEffect(() => {
+    if (!decodedAudioBuffer) {
+      setAnalysisState("idle");
+      setAnalysisError(null);
+      setAnalysisResult(null);
+      return;
+    }
+
+    setAnalysisState("loading");
+    setAnalysisError(null);
+
+    const runAnalysis = () => {
+      try {
+        const result = analyzeAudioBuffer(decodedAudioBuffer);
+        setAnalysisResult(result);
+        setAnalysisState("ready");
+
+        console.log("Detected beat timestamps (s):", result.beatPositions);
+        console.log("Detected energy peaks (s):", result.energyPeaks);
+      } catch (error) {
+        setAnalysisState("error");
+        setAnalysisResult(null);
+        setAnalysisError(
+          error instanceof Error ? error.message : "Unable to analyze the selected song.",
+        );
+      }
+    };
+
+    window.setTimeout(runAnalysis, 0);
+  }, [decodedAudioBuffer]);
 
   useEffect(() => {
     return () => {
@@ -277,6 +513,9 @@ function App() {
     stopPlayback();
     setAudioState("paused");
   };
+
+  const beatPreview = analysisResult?.beatPositions.slice(0, 16) ?? [];
+  const peakPreview = analysisResult?.energyPeaks.slice(0, 12) ?? [];
 
   return (
     <main className="shell">
@@ -387,6 +626,46 @@ function App() {
             into beat analysis.
           </p>
         </div>
+
+        <section className="analysis-panel" aria-live="polite">
+          <p className="analysis-label">Rhythm analysis</p>
+          <p className="analysis-summary">
+            {analysisState === "idle" && "Load a song to analyze its tempo and beats."}
+            {analysisState === "loading" && "Analyzing tempo, beat markers, and energy peaks..."}
+            {analysisState === "error" && analysisError}
+            {analysisState === "ready" &&
+              `Estimated BPM: ${analysisResult?.bpm ?? "unknown"} • Beats: ${
+                analysisResult?.beatPositions.length ?? 0
+              } • Energy peaks: ${analysisResult?.energyPeaks.length ?? 0}`}
+          </p>
+
+          {analysisState === "ready" ? (
+            <>
+              <div className="analysis-grid">
+                <div className="analysis-card">
+                  <p className="analysis-card-label">Beat markers</p>
+                  <p className="analysis-card-value">
+                    {beatPreview.length > 0
+                      ? beatPreview.map((time) => `${time.toFixed(2)}s`).join(", ")
+                      : "None detected"}
+                  </p>
+                </div>
+
+                <div className="analysis-card">
+                  <p className="analysis-card-label">Energy peaks</p>
+                  <p className="analysis-card-value">
+                    {peakPreview.length > 0
+                      ? peakPreview.map((time) => `${time.toFixed(2)}s`).join(", ")
+                      : "None detected"}
+                  </p>
+                </div>
+              </div>
+              <p className="analysis-note">
+                Full beat timestamps are also logged in the dev console.
+              </p>
+            </>
+          ) : null}
+        </section>
       </section>
     </main>
   );

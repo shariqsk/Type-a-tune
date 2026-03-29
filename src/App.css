@@ -229,6 +229,59 @@ h1 {
   color: rgba(245, 237, 224, 0.52);
 }
 
+.analysis-panel {
+  margin-top: 26px;
+  padding: 20px;
+  border-radius: 22px;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(245, 237, 224, 0.08);
+}
+
+.analysis-label {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.74rem;
+  color: rgba(245, 237, 224, 0.56);
+}
+
+.analysis-summary {
+  margin: 10px 0 0;
+  color: rgba(245, 237, 224, 0.82);
+}
+
+.analysis-grid {
+  margin-top: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(245, 237, 224, 0.06);
+}
+
+.analysis-card-label {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(245, 237, 224, 0.54);
+}
+
+.analysis-card-value {
+  margin: 8px 0 0;
+  color: #f8dab1;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.analysis-note {
+  margin: 14px 0 0;
+  color: rgba(245, 237, 224, 0.48);
+}
+
 @media (max-width: 640px) {
   .shell {
     padding: 32px 18px;
