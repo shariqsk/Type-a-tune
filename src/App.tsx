@@ -1645,12 +1645,15 @@ function App() {
         return;
       }
 
-      const beatIndex = currentBeatIndexRef.current;
+      let beatIndex = currentBeatIndexRef.current;
 
       if (beatIndex >= stepPositions.length) {
-        input.preventDefault?.();
-        setPerformanceStatus("Reached the end of the playable step map.");
-        return;
+        currentBeatIndexRef.current = 0;
+        lastPlayedStepIndexRef.current = null;
+        pendingStepIndexRef.current = null;
+        resetPerformanceClock();
+        setPerformanceStep(0);
+        beatIndex = 0;
       }
 
       input.preventDefault?.();
@@ -1859,7 +1862,9 @@ function App() {
       }
 
       setBackgroundTypingState("error");
-      setBackgroundTypingMessage(event.payload);
+      setBackgroundTypingMessage(
+        "Permission needed: System Settings → Privacy & Security → Input Monitoring → allow this app. Then quit and re-run: npm run tauri dev",
+      );
     }).then((unlisten) => {
       if (cancelled) {
         unlisten();
@@ -1901,7 +1906,7 @@ function App() {
       await invoke("enable_background_typing");
       setBackgroundTypingState("enabled");
       setBackgroundTypingMessage(
-        "Background typing is on. If macOS asks, allow it, then type in another app.",
+        "Background typing is on. Type in any window to trigger sounds.",
       );
     } catch (error) {
       setBackgroundTypingState("error");
