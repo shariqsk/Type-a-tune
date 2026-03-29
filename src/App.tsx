@@ -598,12 +598,15 @@ function App() {
     audioBuffer: AudioBuffer,
     startTime: number,
     mode: PlaybackMode,
+    stepPositions: number[],
+    stepIndex: number,
   ) => {
     const now = audioContext.currentTime;
 
     if (mode === "slices") {
-      const snippetDuration = 0.3;
-      const snippetStart = Math.max(0, startTime - snippetDuration);
+      const previousStepStart =
+        stepPositions[Math.max(0, stepIndex - 1)] ?? Math.max(0, startTime - 0.45);
+      const snippetStart = Math.max(0, previousStepStart);
       const snippetEnd = Math.min(audioBuffer.duration, startTime + 0.04);
       const frameStart = Math.floor(snippetStart * audioBuffer.sampleRate);
       const frameEnd = Math.max(
@@ -633,16 +636,17 @@ function App() {
       const sourceNode = audioContext.createBufferSource();
       const filter = audioContext.createBiquadFilter();
       const gainNode = audioContext.createGain();
-      const safeDuration = Math.min(0.28, reversedBuffer.duration);
+      const safeDuration = Math.min(0.68, reversedBuffer.duration);
 
       sourceNode.buffer = reversedBuffer;
-      sourceNode.playbackRate.setValueAtTime(0.92, now);
+      sourceNode.playbackRate.setValueAtTime(0.84, now);
       filter.type = "lowpass";
-      filter.frequency.setValueAtTime(1200, now);
-      filter.Q.value = 0.7;
+      filter.frequency.setValueAtTime(2200, now);
+      filter.Q.value = 0.55;
 
       gainNode.gain.setValueAtTime(0.0001, now);
-      gainNode.gain.linearRampToValueAtTime(0.2, now + 0.018);
+      gainNode.gain.linearRampToValueAtTime(0.28, now + 0.028);
+      gainNode.gain.setValueAtTime(0.28, now + Math.max(0.08, safeDuration - 0.12));
       gainNode.gain.exponentialRampToValueAtTime(0.0001, now + safeDuration);
 
       sourceNode.connect(filter);
@@ -670,9 +674,9 @@ function App() {
     }
 
     const tone = analyzeStepTone(audioBuffer, startTime);
-    const noteDuration = 0.88;
+    const noteDuration = 1.32;
     const crashMidis = [
-      clampMidi(tone.midi - 12),
+      clampMidi(tone.midi - 5),
       clampMidi(tone.midi),
       clampMidi(tone.midi + 1),
       clampMidi(tone.midi + 7),
@@ -685,20 +689,21 @@ function App() {
     const noteGains: GainNode[] = [];
 
     masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.28, now + 0.024);
-    masterGain.gain.exponentialRampToValueAtTime(0.09, now + 0.28);
+    masterGain.gain.linearRampToValueAtTime(0.26, now + 0.03);
+    masterGain.gain.exponentialRampToValueAtTime(0.13, now + 0.28);
+    masterGain.gain.exponentialRampToValueAtTime(0.05, now + 0.86);
     masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
 
     toneFilter.type = "lowpass";
-    toneFilter.frequency.setValueAtTime(1800, now);
-    toneFilter.frequency.exponentialRampToValueAtTime(760, now + noteDuration);
-    toneFilter.Q.value = 0.9;
+    toneFilter.frequency.setValueAtTime(2600, now);
+    toneFilter.frequency.exponentialRampToValueAtTime(980, now + noteDuration);
+    toneFilter.Q.value = 0.65;
 
     hammerFilter.type = "highpass";
-    hammerFilter.frequency.value = 1400;
+    hammerFilter.frequency.value = 1700;
     hammerGain.gain.setValueAtTime(0.0001, now);
-    hammerGain.gain.linearRampToValueAtTime(0.05, now + 0.006);
-    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+    hammerGain.gain.linearRampToValueAtTime(0.042, now + 0.008);
+    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
 
     crashMidis.forEach((midi, index) => {
       const frequency = midiToFrequency(midi);
@@ -706,20 +711,17 @@ function App() {
       const bodyOsc = audioContext.createOscillator();
       const shimmerOsc = audioContext.createOscillator();
       const noteGain = audioContext.createGain();
+      const startOffset = index * 0.018;
 
       fundamentalOsc.type = "triangle";
       bodyOsc.type = "sine";
       shimmerOsc.type = "sine";
 
-      fundamentalOsc.frequency.setValueAtTime(frequency * 1.01, now);
-      bodyOsc.frequency.setValueAtTime(frequency * 2, now);
-      shimmerOsc.frequency.setValueAtTime(frequency * 3.01, now);
+      fundamentalOsc.frequency.setValueAtTime(frequency, now + startOffset);
+      bodyOsc.frequency.setValueAtTime(frequency * 2, now + startOffset);
+      shimmerOsc.frequency.setValueAtTime(frequency * 3, now + startOffset);
 
-      fundamentalOsc.detune.setValueAtTime([0, -6, 8, -4][index] ?? 0, now);
-      bodyOsc.detune.setValueAtTime([0, 5, -7, 4][index] ?? 0, now);
-      shimmerOsc.detune.setValueAtTime([0, -4, 6, -5][index] ?? 0, now);
-
-      noteGain.gain.value = [0.34, 0.26, 0.24, 0.18][index] ?? 0.15;
+      noteGain.gain.value = [0.34, 0.28, 0.24, 0.16][index] ?? 0.15;
 
       fundamentalOsc.connect(noteGain);
       bodyOsc.connect(noteGain);
@@ -740,13 +742,14 @@ function App() {
     hammerGain.connect(masterGain);
     masterGain.connect(audioContext.destination);
 
-    for (const oscillator of oscillators) {
-      oscillator.start(now);
-      oscillator.stop(now + noteDuration + 0.05);
+    for (let index = 0; index < oscillators.length; index += 1) {
+      const startOffset = Math.floor(index / 3) * 0.018;
+      oscillators[index].start(now + startOffset);
+      oscillators[index].stop(now + noteDuration + startOffset + 0.08);
     }
 
     hammerOsc.start(now);
-    hammerOsc.stop(now + 0.08);
+    hammerOsc.stop(now + 0.1);
 
     const activeVoice: PianoVoice = {
       sources: [...oscillators, hammerOsc],
@@ -1057,6 +1060,8 @@ function App() {
               audioBuffer,
               rewoundBeat,
               playbackMode,
+              stepPositions,
+              rewoundIndex,
             );
             setLastPianoNote(cueLabel);
           } catch (error) {
