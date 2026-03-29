@@ -670,51 +670,74 @@ function App() {
     }
 
     const tone = analyzeStepTone(audioBuffer, startTime);
-    const noteDuration = 0.72;
+    const noteDuration = 0.88;
     const crashMidis = [
       clampMidi(tone.midi - 12),
-      clampMidi(tone.midi - 1),
-      clampMidi(tone.midi + 2),
-      clampMidi(tone.midi + 6),
+      clampMidi(tone.midi),
+      clampMidi(tone.midi + 1),
+      clampMidi(tone.midi + 7),
     ];
     const masterGain = audioContext.createGain();
-    const filter = audioContext.createBiquadFilter();
+    const toneFilter = audioContext.createBiquadFilter();
+    const hammerFilter = audioContext.createBiquadFilter();
+    const hammerGain = audioContext.createGain();
     const oscillators: OscillatorNode[] = [];
     const noteGains: GainNode[] = [];
 
     masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.32, now + 0.012);
-    masterGain.gain.exponentialRampToValueAtTime(0.06, now + 0.22);
+    masterGain.gain.linearRampToValueAtTime(0.28, now + 0.024);
+    masterGain.gain.exponentialRampToValueAtTime(0.09, now + 0.28);
     masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
 
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(1500, now);
-    filter.frequency.exponentialRampToValueAtTime(680, now + noteDuration);
-    filter.Q.value = 1.1;
+    toneFilter.type = "lowpass";
+    toneFilter.frequency.setValueAtTime(1800, now);
+    toneFilter.frequency.exponentialRampToValueAtTime(760, now + noteDuration);
+    toneFilter.Q.value = 0.9;
+
+    hammerFilter.type = "highpass";
+    hammerFilter.frequency.value = 1400;
+    hammerGain.gain.setValueAtTime(0.0001, now);
+    hammerGain.gain.linearRampToValueAtTime(0.05, now + 0.006);
+    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
 
     crashMidis.forEach((midi, index) => {
-      const oscillator = audioContext.createOscillator();
-      const noteGain = audioContext.createGain();
       const frequency = midiToFrequency(midi);
-      const detuneOffset = [-18, 11, -9, 16][index] ?? 0;
+      const fundamentalOsc = audioContext.createOscillator();
+      const bodyOsc = audioContext.createOscillator();
+      const shimmerOsc = audioContext.createOscillator();
+      const noteGain = audioContext.createGain();
 
-      oscillator.type = index % 2 === 0 ? "triangle" : "sine";
-      oscillator.frequency.setValueAtTime(frequency * 1.03, now);
-      oscillator.frequency.exponentialRampToValueAtTime(
-        frequency * (index === 0 ? 0.88 : 0.96),
-        now + 0.16,
-      );
-      oscillator.detune.setValueAtTime(detuneOffset, now);
+      fundamentalOsc.type = "triangle";
+      bodyOsc.type = "sine";
+      shimmerOsc.type = "sine";
 
-      noteGain.gain.value = index === 0 ? 0.48 : index === 1 ? 0.36 : 0.22;
-      oscillator.connect(noteGain);
-      noteGain.connect(filter);
+      fundamentalOsc.frequency.setValueAtTime(frequency * 1.01, now);
+      bodyOsc.frequency.setValueAtTime(frequency * 2, now);
+      shimmerOsc.frequency.setValueAtTime(frequency * 3.01, now);
+
+      fundamentalOsc.detune.setValueAtTime([0, -6, 8, -4][index] ?? 0, now);
+      bodyOsc.detune.setValueAtTime([0, 5, -7, 4][index] ?? 0, now);
+      shimmerOsc.detune.setValueAtTime([0, -4, 6, -5][index] ?? 0, now);
+
+      noteGain.gain.value = [0.34, 0.26, 0.24, 0.18][index] ?? 0.15;
+
+      fundamentalOsc.connect(noteGain);
+      bodyOsc.connect(noteGain);
+      shimmerOsc.connect(noteGain);
+      noteGain.connect(toneFilter);
 
       noteGains.push(noteGain);
-      oscillators.push(oscillator);
+      oscillators.push(fundamentalOsc, bodyOsc, shimmerOsc);
     });
 
-    filter.connect(masterGain);
+    const hammerOsc = audioContext.createOscillator();
+    hammerOsc.type = "triangle";
+    hammerOsc.frequency.setValueAtTime(midiToFrequency(clampMidi(tone.midi + 12)) * 2.5, now);
+    hammerOsc.connect(hammerFilter);
+    hammerFilter.connect(hammerGain);
+
+    toneFilter.connect(masterGain);
+    hammerGain.connect(masterGain);
     masterGain.connect(audioContext.destination);
 
     for (const oscillator of oscillators) {
@@ -722,9 +745,12 @@ function App() {
       oscillator.stop(now + noteDuration + 0.05);
     }
 
+    hammerOsc.start(now);
+    hammerOsc.stop(now + 0.08);
+
     const activeVoice: PianoVoice = {
-      sources: oscillators,
-      nodes: [filter, masterGain, ...noteGains],
+      sources: [...oscillators, hammerOsc],
+      nodes: [toneFilter, hammerFilter, hammerGain, masterGain, ...noteGains],
     };
 
     activePianoVoicesRef.current.push(activeVoice);
@@ -743,7 +769,7 @@ function App() {
       );
     };
 
-    return "Crash chord";
+    return "Bad piano crash";
   };
 
   const pauseTransportPlayback = () => {
