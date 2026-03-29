@@ -1856,7 +1856,7 @@ function App() {
       globalKeypressUnlisten = unlisten;
     });
 
-    void listen<string>("global-keypress-error", (event) => {
+    void listen<string>("global-keypress-error", () => {
       if (cancelled) {
         return;
       }
