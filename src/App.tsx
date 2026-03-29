@@ -1832,9 +1832,7 @@ function App() {
 
       <section
         ref={dropzoneRef}
-        className={`dropzone ${isDragActive ? "dropzone-active" : ""} ${
-          isUiPulseActive ? "dropzone-pulse" : ""
-        }`}
+        className={`dropzone ${isDragActive ? "dropzone-active" : ""}`}
         onDragEnter={(event) => {
           event.preventDefault();
           handleDragState(true);
