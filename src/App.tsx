@@ -15,9 +15,9 @@ type AnalysisResult = {
   energyPeaks: number[];
 };
 
-type SliceVoice = {
-  source: AudioBufferSourceNode;
-  gain: GainNode;
+type PianoVoice = {
+  sources: AudioScheduledSourceNode[];
+  nodes: AudioNode[];
 };
 
 const MIN_BPM = 70;
@@ -239,6 +239,73 @@ const createPlayableStepMap = (analysisResult: AnalysisResult | null) => {
   return playableSteps.map((time) => Number(time.toFixed(3)));
 };
 
+const frequencyToMidi = (frequency: number) => {
+  return 69 + 12 * Math.log2(frequency / 440);
+};
+
+const midiToFrequency = (midi: number) => {
+  return 440 * 2 ** ((midi - 69) / 12);
+};
+
+const formatMidiNote = (midi: number) => {
+  const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const noteName = noteNames[((midi % 12) + 12) % 12];
+  const octave = Math.floor(midi / 12) - 1;
+
+  return `${noteName}${octave}`;
+};
+
+const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
+  const sampleRate = audioBuffer.sampleRate;
+  const channelCount = audioBuffer.numberOfChannels;
+  const windowSize = 4096;
+  const centerSample = Math.floor(time * sampleRate);
+  const startSample = Math.max(0, centerSample - Math.floor(windowSize / 2));
+  const endSample = Math.min(audioBuffer.length, startSample + windowSize);
+  const mono = new Float32Array(endSample - startSample);
+
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const channelData = audioBuffer.getChannelData(channelIndex);
+
+    for (let sampleIndex = startSample; sampleIndex < endSample; sampleIndex += 1) {
+      mono[sampleIndex - startSample] += channelData[sampleIndex] / channelCount;
+    }
+  }
+
+  const rms = Math.sqrt(
+    mono.reduce((sum, value) => sum + value * value, 0) / Math.max(1, mono.length),
+  );
+  const minLag = Math.floor(sampleRate / 880);
+  const maxLag = Math.floor(sampleRate / 98);
+  let bestLag = 0;
+  let bestCorrelation = 0;
+
+  for (let lag = minLag; lag <= maxLag; lag += 1) {
+    let correlation = 0;
+
+    for (let index = 0; index < mono.length - lag; index += 1) {
+      correlation += mono[index] * mono[index + lag];
+    }
+
+    correlation /= Math.max(1, mono.length - lag);
+
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestLag = lag;
+    }
+  }
+
+  const rawFrequency =
+    bestLag > 0 && bestCorrelation > 0.0005 ? sampleRate / bestLag : 261.63;
+  const midi = Math.max(48, Math.min(84, Math.round(frequencyToMidi(rawFrequency))));
+  const velocity = Math.max(0.24, Math.min(1, rms * 18));
+
+  return {
+    midi,
+    velocity,
+  };
+};
+
 const isTypingPerformanceKey = (event: KeyboardEvent) => {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
     return false;
@@ -266,7 +333,7 @@ function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
-  const activeSliceVoicesRef = useRef<SliceVoice[]>([]);
+  const activePianoVoicesRef = useRef<PianoVoice[]>([]);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
   const manualStopRef = useRef(false);
@@ -288,6 +355,7 @@ function App() {
   const [playableSteps, setPlayableSteps] = useState<number[]>([]);
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
+  const [lastPianoNote, setLastPianoNote] = useState<string>("--");
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
@@ -333,13 +401,18 @@ function App() {
   };
 
   const stopSlicePlayback = () => {
-    for (const voice of activeSliceVoicesRef.current) {
-      voice.source.stop();
-      voice.source.disconnect();
-      voice.gain.disconnect();
+    for (const voice of activePianoVoicesRef.current) {
+      for (const source of voice.sources) {
+        source.stop();
+        source.disconnect();
+      }
+
+      for (const node of voice.nodes) {
+        node.disconnect();
+      }
     }
 
-    activeSliceVoicesRef.current = [];
+    activePianoVoicesRef.current = [];
   };
 
   const pauseTransportPlayback = () => {
@@ -461,6 +534,7 @@ function App() {
         currentBeatIndexRef.current = 0;
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
+        setLastPianoNote("--");
         setPerformanceStatus("Load a song and start typing to step through detected beats.");
         setAudioState("idle");
         setTrackDuration(null);
@@ -477,6 +551,7 @@ function App() {
       currentBeatIndexRef.current = 0;
       setPerformanceStep(0);
       setLastTriggeredBeat(null);
+      setLastPianoNote("--");
       setPerformanceStatus("Decoding the selected MP3...");
       setAudioState("loading");
       setTrackDuration(null);
@@ -539,6 +614,7 @@ function App() {
       currentBeatIndexRef.current = 0;
       setPerformanceStep(0);
       setLastTriggeredBeat(null);
+      setLastPianoNote("--");
       setPerformanceStatus("Load a song and start typing to step through detected beats.");
       return;
     }
@@ -556,6 +632,7 @@ function App() {
         currentBeatIndexRef.current = 0;
         setPerformanceStep(0);
         setLastTriggeredBeat(null);
+        setLastPianoNote("--");
         setPerformanceStatus(
           nextPlayableSteps.length > 0
             ? "Typing mode is ready. Press any key to advance through the playable step map."
@@ -610,63 +687,123 @@ function App() {
       pauseTransportPlayback();
 
       const startTime = stepPositions[beatIndex];
-      const nextTime =
-        stepPositions[beatIndex + 1] ??
-        Math.min(audioBuffer.duration, startTime + 0.52);
-      const previewLead = 0.012;
-      const sliceStart = Math.max(0, startTime - previewLead);
-      const sliceDuration = Math.max(
-        0.18,
-        Math.min(0.52, Math.max(nextTime - sliceStart, 0.26)),
-      );
 
       void (async () => {
         try {
           const audioContext = await ensureAudioContext();
-          const sourceNode = audioContext.createBufferSource();
-          const gainNode = audioContext.createGain();
+          const tone = analyzeStepTone(audioBuffer, startTime);
           const now = audioContext.currentTime;
-          const safeStart = Math.min(
-            Math.max(0, sliceStart),
-            Math.max(0, audioBuffer.duration - 0.02),
+          const noteDuration = 1.2;
+          const fundamental = midiToFrequency(tone.midi);
+          const chordMidis =
+            tone.velocity > 0.62
+              ? [tone.midi, Math.min(84, tone.midi + 7), Math.min(84, tone.midi + 12)]
+              : tone.velocity > 0.42
+                ? [tone.midi, Math.min(84, tone.midi + 12)]
+                : [tone.midi];
+          const masterGain = audioContext.createGain();
+          const toneFilter = audioContext.createBiquadFilter();
+          const hammerFilter = audioContext.createBiquadFilter();
+          const hammerGain = audioContext.createGain();
+          const oscillators: OscillatorNode[] = [];
+          const noteGains: GainNode[] = [];
+
+          masterGain.gain.setValueAtTime(0.0001, now);
+          masterGain.gain.linearRampToValueAtTime(0.78 * tone.velocity, now + 0.01);
+          masterGain.gain.exponentialRampToValueAtTime(
+            Math.max(0.08, 0.18 * tone.velocity),
+            now + 0.22,
           );
-          const safeDuration = Math.min(sliceDuration, audioBuffer.duration - safeStart);
+          masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
 
-          sourceNode.buffer = audioBuffer;
-          gainNode.gain.cancelScheduledValues(now);
-          gainNode.gain.setValueAtTime(0.0001, now);
-          gainNode.gain.linearRampToValueAtTime(0.72, now + 0.008);
-          gainNode.gain.setValueAtTime(
-            0.72,
-            now + Math.max(0.02, safeDuration - 0.06),
-          );
-          gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
+          toneFilter.type = "lowpass";
+          toneFilter.frequency.setValueAtTime(2200 + tone.velocity * 1800, now);
+          toneFilter.Q.value = 0.7;
 
-          sourceNode.connect(gainNode);
-          gainNode.connect(audioContext.destination);
-          activeSliceVoicesRef.current.push({ source: sourceNode, gain: gainNode });
+          hammerFilter.type = "highpass";
+          hammerFilter.frequency.value = 1800;
+          hammerGain.gain.setValueAtTime(0.0001, now);
+          hammerGain.gain.linearRampToValueAtTime(0.12 * tone.velocity, now + 0.002);
+          hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
 
-          sourceNode.onended = () => {
-            sourceNode.disconnect();
-            gainNode.disconnect();
-            activeSliceVoicesRef.current = activeSliceVoicesRef.current.filter(
-              (voice) => voice.source !== sourceNode,
-            );
+          for (const midi of chordMidis) {
+            const frequency = midiToFrequency(midi);
+            const fundamentalOsc = audioContext.createOscillator();
+            const bodyOsc = audioContext.createOscillator();
+            const shimmerOsc = audioContext.createOscillator();
+
+            fundamentalOsc.type = "triangle";
+            bodyOsc.type = "sine";
+            shimmerOsc.type = "sine";
+
+            fundamentalOsc.frequency.setValueAtTime(frequency, now);
+            bodyOsc.frequency.setValueAtTime(frequency * 2, now);
+            shimmerOsc.frequency.setValueAtTime(frequency * 3, now);
+
+            const noteGain = audioContext.createGain();
+            noteGain.gain.value =
+              midi === tone.midi ? 1 : midi === tone.midi + 12 ? 0.32 : 0.2;
+
+            fundamentalOsc.connect(noteGain);
+            bodyOsc.connect(noteGain);
+            shimmerOsc.connect(noteGain);
+            noteGain.connect(toneFilter);
+
+            noteGains.push(noteGain);
+            oscillators.push(fundamentalOsc, bodyOsc, shimmerOsc);
+          }
+
+          const hammerOsc = audioContext.createOscillator();
+          hammerOsc.type = "triangle";
+          hammerOsc.frequency.setValueAtTime(fundamental * 6, now);
+          hammerOsc.connect(hammerFilter);
+          hammerFilter.connect(hammerGain);
+
+          toneFilter.connect(masterGain);
+          hammerGain.connect(masterGain);
+          masterGain.connect(audioContext.destination);
+
+          for (const oscillator of oscillators) {
+            oscillator.start(now);
+            oscillator.stop(now + noteDuration + 0.04);
+          }
+
+          hammerOsc.start(now);
+          hammerOsc.stop(now + 0.06);
+
+          const activeVoice: PianoVoice = {
+            sources: [...oscillators, hammerOsc],
+            nodes: [toneFilter, hammerFilter, hammerGain, masterGain, ...noteGains],
           };
 
-          sourceNode.start(0, safeStart, safeDuration);
+          activePianoVoicesRef.current.push(activeVoice);
+
+          oscillators[0].onended = () => {
+            for (const source of activeVoice.sources) {
+              source.disconnect();
+            }
+
+            for (const node of activeVoice.nodes) {
+              node.disconnect();
+            }
+
+            activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
+              (voice) => voice !== activeVoice,
+            );
+          };
 
           currentBeatIndexRef.current += 1;
           setPerformanceStep(currentBeatIndexRef.current);
           setLastTriggeredBeat(startTime);
+          setLastPianoNote(formatMidiNote(tone.midi));
           setAudioError(null);
           setPerformanceStatus(
-            `Triggered step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
+            `Played ${formatMidiNote(tone.midi)} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
           );
         } catch (error) {
-          setPerformanceStatus("Unable to play the detected beat slice.");
+          setPerformanceStatus("Unable to play the piano interpretation.");
           setAudioError(
-            error instanceof Error ? error.message : "Slice playback failed.",
+            error instanceof Error ? error.message : "Piano playback failed.",
           );
         }
       })();
@@ -848,6 +985,11 @@ function App() {
               <p className="typing-stat-value">
                 {lastTriggeredBeat === null ? "--:--" : `${lastTriggeredBeat.toFixed(2)}s`}
               </p>
+            </div>
+
+            <div className="typing-stat">
+              <p className="typing-stat-label">Last note</p>
+              <p className="typing-stat-value">{lastPianoNote}</p>
             </div>
           </div>
         </section>
