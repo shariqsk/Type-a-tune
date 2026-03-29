@@ -266,6 +266,11 @@ h1 {
   color: #f8dab1;
 }
 
+.mode-button-disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
 .pace-panel {
   margin-top: 18px;
   max-width: 340px;

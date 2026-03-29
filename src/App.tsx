@@ -19,10 +19,6 @@ type PlaybackMode = "slices" | "piano";
 type TypingFeel = "slow" | "normal" | "high";
 type MistakeMode = "off" | "normal" | "strict";
 type GameSourceMode = "flow" | "lyrics";
-type LyricCue = {
-  charIndex: number;
-  time: number;
-};
 
 type PianoVoice = {
   gain: GainNode;
@@ -420,83 +416,6 @@ const buildPromptStream = (startIndex: number, wordCount: number) => {
   }).join(" ");
 };
 
-const parseTimestamp = (timestamp: string) => {
-  const [minutesPart, secondsPart] = timestamp.split(":");
-  const minutes = Number(minutesPart);
-  const seconds = Number(secondsPart);
-
-  if (!Number.isFinite(minutes) || !Number.isFinite(seconds)) {
-    return null;
-  }
-
-  return minutes * 60 + seconds;
-};
-
-const parseLyricsInput = (rawLyrics: string) => {
-  const lines = rawLyrics.split(/\r?\n/);
-  const cues: LyricCue[] = [];
-  let normalizedText = "";
-
-  for (const line of lines) {
-    const timestampMatches = Array.from(line.matchAll(/\[([0-9]+:[0-9]+(?:\.[0-9]+)?)\]/g));
-    const text = line
-      .replace(/\[[0-9]+:[0-9]+(?:\.[0-9]+)?\]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
-
-    if (!text) {
-      continue;
-    }
-
-    if (normalizedText.length > 0) {
-      normalizedText += " ";
-    }
-
-    const charIndex = normalizedText.length;
-
-    if (timestampMatches.length > 0) {
-      const parsedTime = parseTimestamp(timestampMatches[0][1]);
-
-      if (parsedTime !== null) {
-        cues.push({ charIndex, time: parsedTime });
-      }
-    }
-
-    normalizedText += text;
-  }
-
-  return {
-    normalizedText,
-    cues,
-    firstCueTime: cues[0]?.time ?? null,
-  };
-};
-
-const getMaxLyricCursorForTime = (
-  currentTime: number,
-  promptLength: number,
-  lyricCues: LyricCue[],
-) => {
-  if (lyricCues.length === 0) {
-    return promptLength - 1;
-  }
-
-  if (currentTime < lyricCues[0].time) {
-    return -1;
-  }
-
-  for (let index = 0; index < lyricCues.length - 1; index += 1) {
-    const currentCue = lyricCues[index];
-    const nextCue = lyricCues[index + 1];
-
-    if (currentTime >= currentCue.time && currentTime < nextCue.time) {
-      return Math.max(currentCue.charIndex, nextCue.charIndex - 1);
-    }
-  }
-
-  return promptLength - 1;
-};
 
 const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
   const sampleRate = audioBuffer.sampleRate;
@@ -585,7 +504,6 @@ const isRewindKey = (event: KeyboardEvent) => {
 function App() {
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const lyricsFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const outputChainRef = useRef<OutputChain | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
@@ -627,7 +545,6 @@ function App() {
   const [nextPromptSeedIndex, setNextPromptSeedIndex] = useState(
     INITIAL_PROMPT_WORD_COUNT % PROMPT_WORD_BANK.length,
   );
-  const [lyricsText, setLyricsText] = useState("");
   const [promptCursor, setPromptCursor] = useState(0);
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
@@ -636,12 +553,7 @@ function App() {
     "Load a song and start typing to step through detected beats.",
   );
   const typingFeelProfile = getTypingFeelProfile(typingFeel);
-  const parsedLyrics = parseLyricsInput(lyricsText);
-  const normalizedLyricsText = parsedLyrics.normalizedText;
-  const activePrompt =
-    gameSourceMode === "lyrics" && normalizedLyricsText.length > 0
-      ? normalizedLyricsText
-      : promptStream;
+  const activePrompt = promptStream;
   const promptWindowStart = Math.max(0, promptCursor - 20);
   const promptWindowEnd = Math.min(activePrompt.length, promptCursor + 96);
   const visiblePrompt = activePrompt.slice(promptWindowStart, promptWindowEnd);
@@ -1549,6 +1461,12 @@ function App() {
   }, [gameSourceMode]);
 
   useEffect(() => {
+    if (gameSourceMode === "lyrics") {
+      setGameSourceMode("flow");
+    }
+  }, [gameSourceMode]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isRewindKey(event)) {
         const audioBuffer = audioBufferRef.current;
@@ -1649,59 +1567,7 @@ function App() {
       const expectedCharacter = activePrompt[promptCursor]?.toLowerCase() ?? "";
 
       if (isGameActive && typedCharacter) {
-        const songTimeForPrompt =
-          stepPositions[Math.min(beatIndex, stepPositions.length - 1)] ?? 0;
-
-        if (gameSourceMode === "lyrics") {
-          if (parsedLyrics.cues.length === 0) {
-            setPerformanceStatus("Synced lyrics mode requires timestamped lyrics in `.lrc` format.");
-            return;
-          }
-
-          const maxLyricCursor = getMaxLyricCursorForTime(
-            songTimeForPrompt,
-            activePrompt.length,
-            parsedLyrics.cues,
-          );
-
-          if (maxLyricCursor < 0) {
-            setPerformanceStatus("Intro... waiting for the lyrics to start.");
-          } else if (promptCursor > maxLyricCursor) {
-            setPerformanceStatus("Holding for the next lyric line.");
-          }
-
-          if (maxLyricCursor < 0 || promptCursor > maxLyricCursor) {
-            // Keep the song progressing, but do not consume lyric text yet.
-          } else if (
-            mistakeMode !== "off" &&
-            (!expectedCharacter || typedCharacter !== expectedCharacter)
-          ) {
-            void (async () => {
-              try {
-                const audioContext = await ensureAudioContext();
-                const referenceTime =
-                  stepPositions[Math.min(currentBeatIndexRef.current, stepPositions.length - 1)] ??
-                  null;
-                await playMistakeCue(audioContext, audioBuffer, referenceTime);
-              } catch {
-                // Mistake cue is best-effort only.
-              }
-            })();
-
-            if (mistakeMode === "strict") {
-              setPromptCursor((currentCursor) => Math.max(0, currentCursor - 1));
-            }
-            setLastPianoNote("Mistake cue");
-            setPerformanceStatus(
-              expectedCharacter
-                ? `Mistake: expected ${expectedCharacter === " " ? "space" : `"${expectedCharacter}"`}.`
-                : "Mistake: the lyric line is complete.",
-            );
-            return;
-          } else {
-            setPromptCursor((currentCursor) => Math.min(activePrompt.length, currentCursor + 1));
-          }
-        } else if (mistakeMode !== "off" && (!expectedCharacter || typedCharacter !== expectedCharacter)) {
+        if (mistakeMode !== "off" && (!expectedCharacter || typedCharacter !== expectedCharacter)) {
           void (async () => {
             try {
               const audioContext = await ensureAudioContext();
@@ -2128,67 +1994,16 @@ function App() {
                 Flow lane
               </button>
               <button
-                className={`mode-button ${gameSourceMode === "lyrics" ? "mode-button-active" : ""}`}
+                className="mode-button mode-button-disabled"
                 type="button"
-                onClick={() => setGameSourceMode("lyrics")}
+                disabled
+                aria-disabled="true"
               >
-                Lyrics mode
+                Lyrics mode (WIP)
               </button>
             </div>
+            <p className="prompt-caption">Lyrics mode is disabled for now while sync is rebuilt.</p>
           </div>
-
-          {gameSourceMode === "lyrics" ? (
-            <div className="lyrics-panel">
-              <div className="lyrics-header">
-                <p className="prompt-label">Lyrics source</p>
-                <button
-                  className="prompt-button prompt-button-secondary"
-                  type="button"
-                  onClick={() => lyricsFileInputRef.current?.click()}
-                >
-                  Load `.lrc` / `.txt`
-                </button>
-              </div>
-              <input
-                ref={lyricsFileInputRef}
-                className="file-input"
-                type="file"
-                accept=".lrc,.txt,text/plain"
-                onChange={(event) => {
-                  const selectedFile = event.currentTarget.files?.[0];
-
-                  if (!selectedFile) {
-                    return;
-                  }
-
-                  void selectedFile.text().then((content) => {
-                    setLyricsText(content);
-                    setPromptCursor(0);
-                    setIsGameActive(false);
-                  });
-
-                  event.currentTarget.value = "";
-                }}
-              />
-              <textarea
-                className="lyrics-textarea"
-                value={lyricsText}
-                placeholder="Paste lyrics here. If you load an .lrc file, timestamps will be stripped and the words will drive the typing lane."
-                onChange={(event) => {
-                  setLyricsText(event.currentTarget.value);
-                  setPromptCursor(0);
-                  setIsGameActive(false);
-                }}
-              />
-              <p className="prompt-caption">
-                {normalizedLyricsText.length > 0
-                  ? parsedLyrics.cues.length > 0
-                    ? `Timed lyrics detected. First lyric cue at ${parsedLyrics.firstCueTime?.toFixed(1) ?? "0.0"}s and line waits will follow the file timestamps.`
-                    : "Untimed lyrics loaded. Accurate synced lyrics mode requires timestamped `.lrc` lyrics."
-                  : "Paste or load timestamped `.lrc` lyrics to build the synced typing lane."}
-              </p>
-            </div>
-          ) : null}
 
           <div className="prompt-card" aria-live="polite">
             <div className="prompt-header">
@@ -2197,10 +2012,6 @@ function App() {
                 <button
                   className="prompt-button"
                   type="button"
-                  disabled={
-                    gameSourceMode === "lyrics" &&
-                    (normalizedLyricsText.length === 0 || parsedLyrics.cues.length === 0)
-                  }
                   onClick={() => setIsGameActive((current) => !current)}
                 >
                   {isGameActive ? "Pause game" : "Play game"}
@@ -2229,11 +2040,9 @@ function App() {
               {isGameActive
                 ? mistakeMode === "off"
                   ? "Game is running with mistakes turned off."
-                  : gameSourceMode === "lyrics"
-                    ? "Type the lyric lane exactly, including spaces, as the song progression moves forward."
-                    : "Type the scrolling line exactly, including spaces."
+                  : "Type the scrolling line exactly, including spaces."
                 : gameSourceMode === "lyrics"
-                  ? "Load lyrics, then press Play game to type the song words as the progression moves."
+                  ? "Lyrics mode is disabled for now."
                   : "Press Play game to start the scrolling typing lane."}
             </p>
           </div>
