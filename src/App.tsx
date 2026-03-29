@@ -15,6 +15,8 @@ type AnalysisResult = {
   energyPeaks: number[];
 };
 
+type PlaybackMode = "slices" | "piano";
+
 type PianoVoice = {
   sources: AudioScheduledSourceNode[];
   nodes: AudioNode[];
@@ -353,6 +355,7 @@ function App() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [playableSteps, setPlayableSteps] = useState<number[]>([]);
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("piano");
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
@@ -413,6 +416,167 @@ function App() {
     }
 
     activePianoVoicesRef.current = [];
+  };
+
+  const playRawSliceStep = async (
+    audioContext: AudioContext,
+    audioBuffer: AudioBuffer,
+    startTime: number,
+    stepPositions: number[],
+    beatIndex: number,
+  ) => {
+    const sourceNode = audioContext.createBufferSource();
+    const gainNode = audioContext.createGain();
+    const now = audioContext.currentTime;
+    const nextTime =
+      stepPositions[beatIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.52);
+    const previewLead = 0.012;
+    const sliceStart = Math.max(0, startTime - previewLead);
+    const sliceDuration = Math.max(
+      0.18,
+      Math.min(0.52, Math.max(nextTime - sliceStart, 0.26)),
+    );
+    const safeStart = Math.min(
+      Math.max(0, sliceStart),
+      Math.max(0, audioBuffer.duration - 0.02),
+    );
+    const safeDuration = Math.min(sliceDuration, audioBuffer.duration - safeStart);
+
+    sourceNode.buffer = audioBuffer;
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setValueAtTime(0.0001, now);
+    gainNode.gain.linearRampToValueAtTime(0.72, now + 0.008);
+    gainNode.gain.setValueAtTime(0.72, now + Math.max(0.02, safeDuration - 0.06));
+    gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
+
+    sourceNode.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    const activeVoice: PianoVoice = {
+      sources: [sourceNode],
+      nodes: [gainNode],
+    };
+
+    activePianoVoicesRef.current.push(activeVoice);
+
+    sourceNode.onended = () => {
+      sourceNode.disconnect();
+      gainNode.disconnect();
+      activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
+        (voice) => voice !== activeVoice,
+      );
+    };
+
+    sourceNode.start(0, safeStart, safeDuration);
+  };
+
+  const playPianoStep = async (
+    audioContext: AudioContext,
+    audioBuffer: AudioBuffer,
+    startTime: number,
+  ) => {
+    const tone = analyzeStepTone(audioBuffer, startTime);
+    const now = audioContext.currentTime;
+    const noteDuration = 1.2;
+    const fundamental = midiToFrequency(tone.midi);
+    const chordMidis =
+      tone.velocity > 0.62
+        ? [tone.midi, Math.min(84, tone.midi + 7), Math.min(84, tone.midi + 12)]
+        : tone.velocity > 0.42
+          ? [tone.midi, Math.min(84, tone.midi + 12)]
+          : [tone.midi];
+    const masterGain = audioContext.createGain();
+    const toneFilter = audioContext.createBiquadFilter();
+    const hammerFilter = audioContext.createBiquadFilter();
+    const hammerGain = audioContext.createGain();
+    const oscillators: OscillatorNode[] = [];
+    const noteGains: GainNode[] = [];
+
+    masterGain.gain.setValueAtTime(0.0001, now);
+    masterGain.gain.linearRampToValueAtTime(0.78 * tone.velocity, now + 0.01);
+    masterGain.gain.exponentialRampToValueAtTime(
+      Math.max(0.08, 0.18 * tone.velocity),
+      now + 0.22,
+    );
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
+
+    toneFilter.type = "lowpass";
+    toneFilter.frequency.setValueAtTime(2200 + tone.velocity * 1800, now);
+    toneFilter.Q.value = 0.7;
+
+    hammerFilter.type = "highpass";
+    hammerFilter.frequency.value = 1800;
+    hammerGain.gain.setValueAtTime(0.0001, now);
+    hammerGain.gain.linearRampToValueAtTime(0.12 * tone.velocity, now + 0.002);
+    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+
+    for (const midi of chordMidis) {
+      const frequency = midiToFrequency(midi);
+      const fundamentalOsc = audioContext.createOscillator();
+      const bodyOsc = audioContext.createOscillator();
+      const shimmerOsc = audioContext.createOscillator();
+
+      fundamentalOsc.type = "triangle";
+      bodyOsc.type = "sine";
+      shimmerOsc.type = "sine";
+
+      fundamentalOsc.frequency.setValueAtTime(frequency, now);
+      bodyOsc.frequency.setValueAtTime(frequency * 2, now);
+      shimmerOsc.frequency.setValueAtTime(frequency * 3, now);
+
+      const noteGain = audioContext.createGain();
+      noteGain.gain.value =
+        midi === tone.midi ? 1 : midi === tone.midi + 12 ? 0.32 : 0.2;
+
+      fundamentalOsc.connect(noteGain);
+      bodyOsc.connect(noteGain);
+      shimmerOsc.connect(noteGain);
+      noteGain.connect(toneFilter);
+
+      noteGains.push(noteGain);
+      oscillators.push(fundamentalOsc, bodyOsc, shimmerOsc);
+    }
+
+    const hammerOsc = audioContext.createOscillator();
+    hammerOsc.type = "triangle";
+    hammerOsc.frequency.setValueAtTime(fundamental * 6, now);
+    hammerOsc.connect(hammerFilter);
+    hammerFilter.connect(hammerGain);
+
+    toneFilter.connect(masterGain);
+    hammerGain.connect(masterGain);
+    masterGain.connect(audioContext.destination);
+
+    for (const oscillator of oscillators) {
+      oscillator.start(now);
+      oscillator.stop(now + noteDuration + 0.04);
+    }
+
+    hammerOsc.start(now);
+    hammerOsc.stop(now + 0.06);
+
+    const activeVoice: PianoVoice = {
+      sources: [...oscillators, hammerOsc],
+      nodes: [toneFilter, hammerFilter, hammerGain, masterGain, ...noteGains],
+    };
+
+    activePianoVoicesRef.current.push(activeVoice);
+
+    oscillators[0].onended = () => {
+      for (const source of activeVoice.sources) {
+        source.disconnect();
+      }
+
+      for (const node of activeVoice.nodes) {
+        node.disconnect();
+      }
+
+      activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
+        (voice) => voice !== activeVoice,
+      );
+    };
+
+    return formatMidiNote(tone.midi);
   };
 
   const pauseTransportPlayback = () => {
@@ -691,119 +855,40 @@ function App() {
       void (async () => {
         try {
           const audioContext = await ensureAudioContext();
-          const tone = analyzeStepTone(audioBuffer, startTime);
-          const now = audioContext.currentTime;
-          const noteDuration = 1.2;
-          const fundamental = midiToFrequency(tone.midi);
-          const chordMidis =
-            tone.velocity > 0.62
-              ? [tone.midi, Math.min(84, tone.midi + 7), Math.min(84, tone.midi + 12)]
-              : tone.velocity > 0.42
-                ? [tone.midi, Math.min(84, tone.midi + 12)]
-                : [tone.midi];
-          const masterGain = audioContext.createGain();
-          const toneFilter = audioContext.createBiquadFilter();
-          const hammerFilter = audioContext.createBiquadFilter();
-          const hammerGain = audioContext.createGain();
-          const oscillators: OscillatorNode[] = [];
-          const noteGains: GainNode[] = [];
+          let playedLabel = "Song slice";
 
-          masterGain.gain.setValueAtTime(0.0001, now);
-          masterGain.gain.linearRampToValueAtTime(0.78 * tone.velocity, now + 0.01);
-          masterGain.gain.exponentialRampToValueAtTime(
-            Math.max(0.08, 0.18 * tone.velocity),
-            now + 0.22,
-          );
-          masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
-
-          toneFilter.type = "lowpass";
-          toneFilter.frequency.setValueAtTime(2200 + tone.velocity * 1800, now);
-          toneFilter.Q.value = 0.7;
-
-          hammerFilter.type = "highpass";
-          hammerFilter.frequency.value = 1800;
-          hammerGain.gain.setValueAtTime(0.0001, now);
-          hammerGain.gain.linearRampToValueAtTime(0.12 * tone.velocity, now + 0.002);
-          hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
-
-          for (const midi of chordMidis) {
-            const frequency = midiToFrequency(midi);
-            const fundamentalOsc = audioContext.createOscillator();
-            const bodyOsc = audioContext.createOscillator();
-            const shimmerOsc = audioContext.createOscillator();
-
-            fundamentalOsc.type = "triangle";
-            bodyOsc.type = "sine";
-            shimmerOsc.type = "sine";
-
-            fundamentalOsc.frequency.setValueAtTime(frequency, now);
-            bodyOsc.frequency.setValueAtTime(frequency * 2, now);
-            shimmerOsc.frequency.setValueAtTime(frequency * 3, now);
-
-            const noteGain = audioContext.createGain();
-            noteGain.gain.value =
-              midi === tone.midi ? 1 : midi === tone.midi + 12 ? 0.32 : 0.2;
-
-            fundamentalOsc.connect(noteGain);
-            bodyOsc.connect(noteGain);
-            shimmerOsc.connect(noteGain);
-            noteGain.connect(toneFilter);
-
-            noteGains.push(noteGain);
-            oscillators.push(fundamentalOsc, bodyOsc, shimmerOsc);
-          }
-
-          const hammerOsc = audioContext.createOscillator();
-          hammerOsc.type = "triangle";
-          hammerOsc.frequency.setValueAtTime(fundamental * 6, now);
-          hammerOsc.connect(hammerFilter);
-          hammerFilter.connect(hammerGain);
-
-          toneFilter.connect(masterGain);
-          hammerGain.connect(masterGain);
-          masterGain.connect(audioContext.destination);
-
-          for (const oscillator of oscillators) {
-            oscillator.start(now);
-            oscillator.stop(now + noteDuration + 0.04);
-          }
-
-          hammerOsc.start(now);
-          hammerOsc.stop(now + 0.06);
-
-          const activeVoice: PianoVoice = {
-            sources: [...oscillators, hammerOsc],
-            nodes: [toneFilter, hammerFilter, hammerGain, masterGain, ...noteGains],
-          };
-
-          activePianoVoicesRef.current.push(activeVoice);
-
-          oscillators[0].onended = () => {
-            for (const source of activeVoice.sources) {
-              source.disconnect();
-            }
-
-            for (const node of activeVoice.nodes) {
-              node.disconnect();
-            }
-
-            activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
-              (voice) => voice !== activeVoice,
+          if (playbackMode === "piano") {
+            playedLabel = await playPianoStep(audioContext, audioBuffer, startTime);
+          } else {
+            await playRawSliceStep(
+              audioContext,
+              audioBuffer,
+              startTime,
+              stepPositions,
+              beatIndex,
             );
-          };
+          }
 
           currentBeatIndexRef.current += 1;
           setPerformanceStep(currentBeatIndexRef.current);
           setLastTriggeredBeat(startTime);
-          setLastPianoNote(formatMidiNote(tone.midi));
+          setLastPianoNote(playedLabel);
           setAudioError(null);
           setPerformanceStatus(
-            `Played ${formatMidiNote(tone.midi)} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
+            `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
           );
         } catch (error) {
-          setPerformanceStatus("Unable to play the piano interpretation.");
+          setPerformanceStatus(
+            playbackMode === "piano"
+              ? "Unable to play the piano interpretation."
+              : "Unable to play the song slice mode.",
+          );
           setAudioError(
-            error instanceof Error ? error.message : "Piano playback failed.",
+            error instanceof Error
+              ? error.message
+              : playbackMode === "piano"
+                ? "Piano playback failed."
+                : "Song slice playback failed.",
           );
         }
       })();
@@ -814,7 +899,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [analysisState, playableSteps]);
+  }, [analysisState, playableSteps, playbackMode]);
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -972,6 +1057,23 @@ function App() {
           <p className="analysis-label">Typing progression</p>
           <p className="analysis-summary">{performanceStatus}</p>
 
+          <div className="mode-switch" role="group" aria-label="Typing playback mode">
+            <button
+              className={`mode-button ${playbackMode === "slices" ? "mode-button-active" : ""}`}
+              type="button"
+              onClick={() => setPlaybackMode("slices")}
+            >
+              Song slices
+            </button>
+            <button
+              className={`mode-button ${playbackMode === "piano" ? "mode-button-active" : ""}`}
+              type="button"
+              onClick={() => setPlaybackMode("piano")}
+            >
+              Piano interpretation
+            </button>
+          </div>
+
           <div className="typing-stats">
             <div className="typing-stat">
               <p className="typing-stat-label">Current step</p>
@@ -988,7 +1090,9 @@ function App() {
             </div>
 
             <div className="typing-stat">
-              <p className="typing-stat-label">Last note</p>
+              <p className="typing-stat-label">
+                {playbackMode === "piano" ? "Last note" : "Last mode"}
+              </p>
               <p className="typing-stat-value">{lastPianoNote}</p>
             </div>
           </div>
