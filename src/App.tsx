@@ -1,49 +1,51 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [isDragActive, setIsDragActive] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const handleDragState = (isActive: boolean) => {
+    setIsDragActive(isActive);
+  };
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <main className="shell">
+      <section className="hero">
+        <p className="eyebrow">Type-a-tune</p>
+        <h1>Drop a song or start typing</h1>
+        <p className="subtitle">
+          Turn each keystroke into a piano performance, one note at a time.
+        </p>
+      </section>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
+      <section
+        className={`dropzone ${isDragActive ? "dropzone-active" : ""}`}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          handleDragState(true);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          handleDragState(true);
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          handleDragState(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          handleDragState(false);
         }}
       >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+        <div className="dropzone-icon" aria-hidden="true">
+          ♪
+        </div>
+        <p className="dropzone-title">Drag and drop an MP3 here</p>
+        <p className="dropzone-caption">
+          A default song will come later. For now, this is the upload landing
+          zone.
+        </p>
+      </section>
     </main>
   );
 }

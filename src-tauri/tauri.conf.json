@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-apptype-a-tune",
+  "productName": "Type-a-tune",
   "version": "0.1.0",
   "identifier": "com.typeatune.app",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-apptype-a-tune",
+        "title": "Type-a-tune",
         "width": 800,
-        "height": 600
+        "height": 640,
+        "minWidth": 760,
+        "minHeight": 580
       }
     ],
     "security": {
