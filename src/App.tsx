@@ -16,11 +16,17 @@ type AnalysisResult = {
 };
 
 type PlaybackMode = "slices" | "piano";
+type TypingFeel = "slow" | "normal" | "high";
 
 type PianoVoice = {
   gain: GainNode;
   sources: AudioScheduledSourceNode[];
   nodes: AudioNode[];
+};
+
+type OutputChain = {
+  compressor: DynamicsCompressorNode;
+  masterGain: GainNode;
 };
 
 type PerformanceClock = {
@@ -30,6 +36,7 @@ type PerformanceClock = {
 
 const MIN_BPM = 70;
 const MAX_BPM = 170;
+const TYPING_FEELS: TypingFeel[] = ["slow", "normal", "high"];
 
 const normalizeBpm = (value: number) => {
   let bpm = value;
@@ -265,6 +272,36 @@ const formatMidiNote = (midi: number) => {
 
 const clampMidi = (midi: number) => Math.max(36, Math.min(84, midi));
 
+const getTypingFeelProfile = (typingFeel: TypingFeel) => {
+  switch (typingFeel) {
+    case "slow":
+      return {
+        triggerGateMs: 36,
+        duckReleaseTime: 0.14,
+        idleDelayMs: 1250,
+        sliceTailMaxDuration: 1.45,
+        pianoTailDuration: 2.9,
+      };
+    case "high":
+      return {
+        triggerGateMs: 24,
+        duckReleaseTime: 0.08,
+        idleDelayMs: 620,
+        sliceTailMaxDuration: 0.92,
+        pianoTailDuration: 1.95,
+      };
+    case "normal":
+    default:
+      return {
+        triggerGateMs: 30,
+        duckReleaseTime: 0.11,
+        idleDelayMs: 920,
+        sliceTailMaxDuration: 1.18,
+        pianoTailDuration: 2.45,
+      };
+  }
+};
+
 const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
   const sampleRate = audioBuffer.sampleRate;
   const channelCount = audioBuffer.numberOfChannels;
@@ -353,6 +390,7 @@ function App() {
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const outputChainRef = useRef<OutputChain | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const activePianoVoicesRef = useRef<PianoVoice[]>([]);
@@ -382,12 +420,14 @@ function App() {
   const [playableSteps, setPlayableSteps] = useState<number[]>([]);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("piano");
   const [isPaceLocked, setIsPaceLocked] = useState(false);
+  const [typingFeel, setTypingFeel] = useState<TypingFeel>("normal");
   const [performanceStep, setPerformanceStep] = useState(0);
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
+  const typingFeelProfile = getTypingFeelProfile(typingFeel);
 
   const handleDragState = (isActive: boolean) => {
     setIsDragActive(isActive);
@@ -414,6 +454,30 @@ function App() {
     }
 
     return audioContextRef.current;
+  };
+
+  const ensureOutputChain = (audioContext: AudioContext) => {
+    if (!outputChainRef.current) {
+      const compressor = audioContext.createDynamicsCompressor();
+      const masterGain = audioContext.createGain();
+
+      compressor.threshold.setValueAtTime(-20, audioContext.currentTime);
+      compressor.knee.setValueAtTime(18, audioContext.currentTime);
+      compressor.ratio.setValueAtTime(3.2, audioContext.currentTime);
+      compressor.attack.setValueAtTime(0.004, audioContext.currentTime);
+      compressor.release.setValueAtTime(0.16, audioContext.currentTime);
+      masterGain.gain.setValueAtTime(0.9, audioContext.currentTime);
+
+      compressor.connect(masterGain);
+      masterGain.connect(audioContext.destination);
+
+      outputChainRef.current = {
+        compressor,
+        masterGain,
+      };
+    }
+
+    return outputChainRef.current.compressor;
   };
 
   const stopPlayback = () => {
@@ -469,7 +533,7 @@ function App() {
 
   const duckActiveVoices = (audioContext: AudioContext) => {
     for (const voice of [...activePianoVoicesRef.current]) {
-      releaseVoice(voice, audioContext, 0.1);
+      releaseVoice(voice, audioContext, typingFeelProfile.duckReleaseTime);
     }
   };
 
@@ -499,7 +563,7 @@ function App() {
   const canAcceptTriggerBurst = () => {
     const now = Date.now();
 
-    if (now - lastTriggerAtRef.current < 32) {
+    if (now - lastTriggerAtRef.current < typingFeelProfile.triggerGateMs) {
       return false;
     }
 
@@ -517,6 +581,7 @@ function App() {
   ) => {
     const sourceNode = audioContext.createBufferSource();
     const gainNode = audioContext.createGain();
+    const outputNode = ensureOutputChain(audioContext);
     const now = audioContext.currentTime;
     const nextTime =
       stepPositions[beatIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.52);
@@ -538,15 +603,15 @@ function App() {
     sourceNode.buffer = audioBuffer;
     gainNode.gain.cancelScheduledValues(now);
     gainNode.gain.setValueAtTime(0.0001, now);
-    gainNode.gain.linearRampToValueAtTime(0.72, now + 0.008);
+    gainNode.gain.linearRampToValueAtTime(0.56, now + 0.012);
     gainNode.gain.setValueAtTime(
-      0.72,
-      now + Math.max(paced ? 0.12 : 0.02, safeDuration - (paced ? 0.14 : 0.06)),
+      0.56,
+      now + Math.max(paced ? 0.18 : 0.08, safeDuration - (paced ? 0.18 : 0.08)),
     );
     gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
 
     sourceNode.connect(gainNode);
-    gainNode.connect(audioContext.destination);
+    gainNode.connect(outputNode);
 
     const activeVoice: PianoVoice = {
       gain: gainNode,
@@ -577,11 +642,12 @@ function App() {
   ) => {
     const tone = analyzeStepTone(audioBuffer, startTime);
     const now = audioContext.currentTime;
+    const outputNode = ensureOutputChain(audioContext);
     const nextTime =
       stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.72);
     const noteDuration = paced
-      ? Math.max(0.92, Math.min(2.1, nextTime - startTime + 0.4))
-      : 1.2;
+      ? Math.max(1.05, Math.min(2.3, nextTime - startTime + 0.42))
+      : 1.45;
     const fundamental = midiToFrequency(tone.midi);
     const chordMidis =
       tone.velocity > 0.62
@@ -597,10 +663,10 @@ function App() {
     const noteGains: GainNode[] = [];
 
     masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.78 * tone.velocity, now + 0.01);
+    masterGain.gain.linearRampToValueAtTime(0.64 * tone.velocity, now + 0.016);
     masterGain.gain.exponentialRampToValueAtTime(
-      Math.max(0.08, 0.18 * tone.velocity),
-      now + (paced ? 0.34 : 0.22),
+      Math.max(0.075, 0.15 * tone.velocity),
+      now + (paced ? 0.4 : 0.28),
     );
     masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
 
@@ -611,8 +677,8 @@ function App() {
     hammerFilter.type = "highpass";
     hammerFilter.frequency.value = 1800;
     hammerGain.gain.setValueAtTime(0.0001, now);
-    hammerGain.gain.linearRampToValueAtTime(0.12 * tone.velocity, now + 0.002);
-    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+    hammerGain.gain.linearRampToValueAtTime(0.05 * tone.velocity, now + 0.003);
+    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
 
     for (const midi of chordMidis) {
       const frequency = midiToFrequency(midi);
@@ -649,7 +715,7 @@ function App() {
 
     toneFilter.connect(masterGain);
     hammerGain.connect(masterGain);
-    masterGain.connect(audioContext.destination);
+    masterGain.connect(outputNode);
 
     for (const oscillator of oscillators) {
       oscillator.start(now);
@@ -684,174 +750,19 @@ function App() {
     return formatMidiNote(tone.midi);
   };
 
-  const playIdleSliceTail = async (
-    audioContext: AudioContext,
-    audioBuffer: AudioBuffer,
-    startTime: number,
-    stepPositions: number[],
-    stepIndex: number,
-  ) => {
-    const nextTime =
-      stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.6);
-    const tailStart = Math.min(
-      Math.max(0, startTime + 0.08),
-      Math.max(0, audioBuffer.duration - 0.02),
-    );
-    const tailDuration = Math.min(
-      1.2,
-      Math.max(0.55, Math.max(nextTime - tailStart + 0.18, 0.62)),
-    );
-    const safeDuration = Math.min(tailDuration, audioBuffer.duration - tailStart);
-    const now = audioContext.currentTime;
-    const sourceNode = audioContext.createBufferSource();
-    const filter = audioContext.createBiquadFilter();
-    const gainNode = audioContext.createGain();
-
-    sourceNode.buffer = audioBuffer;
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(1700, now);
-    filter.Q.value = 0.45;
-
-    gainNode.gain.setValueAtTime(0.0001, now);
-    gainNode.gain.linearRampToValueAtTime(0.16, now + 0.06);
-    gainNode.gain.setValueAtTime(0.16, now + Math.max(0.2, safeDuration - 0.26));
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + safeDuration);
-
-    sourceNode.connect(filter);
-    filter.connect(gainNode);
-    gainNode.connect(audioContext.destination);
-
-    const activeVoice: PianoVoice = {
-      gain: gainNode,
-      sources: [sourceNode],
-      nodes: [filter, gainNode],
-    };
-
-    activePianoVoicesRef.current.push(activeVoice);
-
-    sourceNode.onended = () => {
-      sourceNode.disconnect();
-      filter.disconnect();
-      gainNode.disconnect();
-      activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
-        (voice) => voice !== activeVoice,
-      );
-    };
-
-    sourceNode.start(0, tailStart, safeDuration);
-  };
-
-  const playIdlePianoTail = async (
-    audioContext: AudioContext,
-    audioBuffer: AudioBuffer,
-    startTime: number,
-  ) => {
-    const tone = analyzeStepTone(audioBuffer, startTime);
-    const now = audioContext.currentTime;
-    const duration = 2.4;
-    const frequencies = [
-      midiToFrequency(tone.midi),
-      midiToFrequency(clampMidi(tone.midi + 12)),
-    ];
-    const masterGain = audioContext.createGain();
-    const filter = audioContext.createBiquadFilter();
-    const oscillators: OscillatorNode[] = [];
-    const noteGains: GainNode[] = [];
-
-    masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.12, now + 0.08);
-    masterGain.gain.exponentialRampToValueAtTime(0.065, now + 0.82);
-    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(1900, now);
-    filter.frequency.exponentialRampToValueAtTime(680, now + duration);
-    filter.Q.value = 0.5;
-
-    frequencies.forEach((frequency, index) => {
-      const oscillator = audioContext.createOscillator();
-      const bodyOsc = audioContext.createOscillator();
-      const noteGain = audioContext.createGain();
-
-      oscillator.type = "triangle";
-      bodyOsc.type = "sine";
-      oscillator.frequency.setValueAtTime(frequency, now);
-      bodyOsc.frequency.setValueAtTime(frequency * 2, now);
-      noteGain.gain.value = index === 0 ? 0.7 : 0.28;
-
-      oscillator.connect(noteGain);
-      bodyOsc.connect(noteGain);
-      noteGain.connect(filter);
-
-      oscillators.push(oscillator, bodyOsc);
-      noteGains.push(noteGain);
-    });
-
-    filter.connect(masterGain);
-    masterGain.connect(audioContext.destination);
-
-    for (const oscillator of oscillators) {
-      oscillator.start(now);
-      oscillator.stop(now + duration + 0.06);
-    }
-
-    const activeVoice: PianoVoice = {
-      gain: masterGain,
-      sources: oscillators,
-      nodes: [filter, masterGain, ...noteGains],
-    };
-
-    activePianoVoicesRef.current.push(activeVoice);
-
-    oscillators[0].onended = () => {
-      for (const source of activeVoice.sources) {
-        source.disconnect();
-      }
-
-      for (const node of activeVoice.nodes) {
-        node.disconnect();
-      }
-
-      activePianoVoicesRef.current = activePianoVoicesRef.current.filter(
-        (voice) => voice !== activeVoice,
-      );
-    };
-  };
-
-  const scheduleIdleRelease = (
-    mode: PlaybackMode,
-    startTime: number,
-    stepPositions: number[],
-    stepIndex: number,
-  ) => {
+  const scheduleIdleRelease = () => {
     clearIdleRelease();
     idleReleaseTimerRef.current = window.setTimeout(() => {
-      const audioBuffer = audioBufferRef.current;
-
-      if (!audioBuffer) {
-        return;
-      }
-
-      void (async () => {
-        try {
-          const audioContext = await ensureAudioContext();
-
-          if (mode === "piano") {
-            await playIdlePianoTail(audioContext, audioBuffer, startTime);
-          } else {
-            await playIdleSliceTail(
-              audioContext,
-              audioBuffer,
-              startTime,
-              stepPositions,
-              stepIndex,
-            );
+      void ensureAudioContext()
+        .then((audioContext) => {
+          for (const voice of [...activePianoVoicesRef.current]) {
+            releaseVoice(voice, audioContext, 0.42);
           }
-        } catch {
-          // Idle release is decorative; skip hard failures here.
-        }
-      })();
-    }, 700);
+        })
+        .catch(() => {
+          // Idle release is best-effort only.
+        });
+    }, typingFeelProfile.idleDelayMs);
   };
 
   const sustainCurrentStep = async (
@@ -867,11 +778,11 @@ function App() {
     }
 
     if (mode === "piano") {
-      await playIdlePianoTail(audioContext, audioBuffer, startTime);
+      await playPianoStep(audioContext, audioBuffer, startTime, stepPositions, stepIndex, true);
       return;
     }
 
-    await playIdleSliceTail(audioContext, audioBuffer, startTime, stepPositions, stepIndex);
+    await playRawSliceStep(audioContext, audioBuffer, startTime, stepPositions, stepIndex, true);
   };
 
   const playRewindCue = async (
@@ -883,6 +794,7 @@ function App() {
     stepIndex: number,
   ) => {
     const now = audioContext.currentTime;
+    const outputNode = ensureOutputChain(audioContext);
 
     if (mode === "slices") {
       const previousStepStart =
@@ -932,7 +844,7 @@ function App() {
 
       sourceNode.connect(filter);
       filter.connect(gainNode);
-      gainNode.connect(audioContext.destination);
+      gainNode.connect(outputNode);
 
       const activeVoice: PianoVoice = {
         gain: gainNode,
@@ -1022,7 +934,7 @@ function App() {
 
     toneFilter.connect(masterGain);
     hammerGain.connect(masterGain);
-    masterGain.connect(audioContext.destination);
+    masterGain.connect(outputNode);
 
     for (let index = 0; index < oscillators.length; index += 1) {
       const startOffset = Math.floor(index / 3) * 0.018;
@@ -1456,7 +1368,7 @@ function App() {
               stepPositions,
               stepIndexToPlay,
             );
-            scheduleIdleRelease(playbackMode, startTime, stepPositions, stepIndexToPlay);
+            scheduleIdleRelease();
           } catch {
             // Holding the current step is best-effort only.
           }
@@ -1518,7 +1430,7 @@ function App() {
               ? `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`
               : `Held ${playedLabel} at step ${currentBeatIndexRef.current} until the song timeline advances.`,
           );
-          scheduleIdleRelease(playbackMode, startTime, stepPositions, stepIndexToPlay);
+          scheduleIdleRelease();
         } catch (error) {
           if (pendingStepIndexRef.current === stepIndexToPlay) {
             pendingStepIndexRef.current = null;
@@ -1544,7 +1456,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [analysisState, playableSteps, playbackMode, isPaceLocked]);
+  }, [analysisState, playableSteps, playbackMode, isPaceLocked, typingFeel]);
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -1741,6 +1653,33 @@ function App() {
               <span className={`pace-option ${isPaceLocked ? "pace-option-active" : ""}`}>
                 Keep song pace
               </span>
+            </div>
+          </div>
+
+          <div className="feel-panel">
+            <label className="pace-label" htmlFor="typing-feel">
+              Typing feel
+            </label>
+            <div className="feel-slider-wrap">
+              <input
+                id="typing-feel"
+                className="feel-slider"
+                type="range"
+                min="0"
+                max="2"
+                step="1"
+                value={TYPING_FEELS.indexOf(typingFeel)}
+                aria-label="Typing feel"
+                onChange={(event) => {
+                  const nextFeel = TYPING_FEELS[Number(event.currentTarget.value)] ?? "normal";
+                  setTypingFeel(nextFeel);
+                }}
+              />
+            </div>
+            <div className="feel-labels" aria-hidden="true">
+              <span className={typingFeel === "slow" ? "feel-label-active" : ""}>Slow</span>
+              <span className={typingFeel === "normal" ? "feel-label-active" : ""}>Normal</span>
+              <span className={typingFeel === "high" ? "feel-label-active" : ""}>High</span>
             </div>
           </div>
 
