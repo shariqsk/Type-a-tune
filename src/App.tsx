@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
@@ -34,6 +34,21 @@ type OutputChain = {
   input: GainNode;
   compressor: DynamicsCompressorNode;
   masterGain: GainNode;
+};
+
+type GlobalKeypressPayload = {
+  key: string;
+};
+
+type PerformanceKeyInput = {
+  key: string;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  repeat?: boolean;
+  target?: EventTarget | null;
+  preventDefault?: () => void;
+  source?: "window" | "global";
 };
 
 type PerformanceClock = {
@@ -412,14 +427,6 @@ const getTypingFeelProfile = (typingFeel: TypingFeel) => {
   }
 };
 
-const getTypedCharacter = (event: KeyboardEvent) => {
-  if (event.key === "Enter" || event.key === " ") {
-    return " ";
-  }
-
-  return event.key.length === 1 ? event.key.toLowerCase() : "";
-};
-
 const buildPromptStream = (startIndex: number, wordCount: number) => {
   return Array.from({ length: wordCount }, (_, index) => {
     return PROMPT_WORD_BANK[(startIndex + index) % PROMPT_WORD_BANK.length];
@@ -488,28 +495,36 @@ const isEditableTarget = (target: EventTarget | null) => {
   );
 };
 
-const isTypingPerformanceKey = (event: KeyboardEvent) => {
-  if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
+const isTypingPerformanceInput = (input: PerformanceKeyInput) => {
+  if (input.metaKey || input.ctrlKey || input.altKey || input.repeat) {
     return false;
   }
 
-  if (event.key === "Backspace" || isEditableTarget(event.target)) {
+  if (input.key === "Backspace" || isEditableTarget(input.target ?? null)) {
     return false;
   }
 
-  return event.key.length === 1 || event.key === " " || event.key === "Enter";
+  return input.key.length === 1 || input.key === " " || input.key === "Enter";
 };
 
-const isRewindKey = (event: KeyboardEvent) => {
-  if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
+const isRewindInput = (input: PerformanceKeyInput) => {
+  if (input.metaKey || input.ctrlKey || input.altKey || input.repeat) {
     return false;
   }
 
-  if (isEditableTarget(event.target)) {
+  if (isEditableTarget(input.target ?? null)) {
     return false;
   }
 
-  return event.key === "Backspace";
+  return input.key === "Backspace";
+};
+
+const getTypedCharacterFromKey = (key: string) => {
+  if (key === "Enter" || key === " ") {
+    return " ";
+  }
+
+  return key.length === 1 ? key.toLowerCase() : "";
 };
 
 function App() {
@@ -530,6 +545,9 @@ function App() {
   const pausedAtRef = useRef(0);
   const manualStopRef = useRef(false);
   const currentBeatIndexRef = useRef(0);
+  const lastHandledInputRef = useRef<{ key: string; source: "window" | "global"; at: number } | null>(
+    null,
+  );
   const [isDragActive, setIsDragActive] = useState(false);
   const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(DEFAULT_SONG);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -551,6 +569,12 @@ function App() {
   const [mistakeMode, setMistakeMode] = useState<MistakeMode>("normal");
   const [gameSourceMode, setGameSourceMode] = useState<GameSourceMode>("flow");
   const [isGameActive, setIsGameActive] = useState(false);
+  const [backgroundTypingState, setBackgroundTypingState] = useState<
+    "idle" | "enabling" | "enabled" | "error"
+  >("idle");
+  const [backgroundTypingMessage, setBackgroundTypingMessage] = useState(
+    "Enable this when you want Type-a-tune to react while you use other apps.",
+  );
   const [promptStream, setPromptStream] = useState(() =>
     buildPromptStream(0, INITIAL_PROMPT_WORD_COUNT),
   );
@@ -562,7 +586,6 @@ function App() {
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
   const [isUiPulseActive, setIsUiPulseActive] = useState(false);
-  const [backgroundMode, setBackgroundMode] = useState(false);
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
@@ -743,6 +766,28 @@ function App() {
 
     lastTriggerAtRef.current = now;
     return true;
+  };
+
+  const shouldIgnoreDuplicateInput = (input: PerformanceKeyInput) => {
+    const source = input.source ?? "window";
+    const now = Date.now();
+    const lastHandledInput = lastHandledInputRef.current;
+
+    if (
+      lastHandledInput &&
+      lastHandledInput.key === input.key &&
+      lastHandledInput.source !== source &&
+      now - lastHandledInput.at <= 45
+    ) {
+      return true;
+    }
+
+    lastHandledInputRef.current = {
+      key: input.key,
+      source,
+      at: now,
+    };
+    return false;
   };
 
   const playRawSliceStep = async (
@@ -1515,12 +1560,12 @@ function App() {
   }, [gameSourceMode]);
 
   useEffect(() => {
-    void invoke("set_background_mode", { enabled: backgroundMode });
-  }, [backgroundMode]);
+    const handlePerformanceInput = (input: PerformanceKeyInput) => {
+      if (shouldIgnoreDuplicateInput(input)) {
+        return;
+      }
 
-  useEffect(() => {
-    const processKey = (key: string) => {
-      if (key === "Backspace") {
+      if (isRewindInput(input)) {
         const audioBuffer = audioBufferRef.current;
         const stepPositions = playableSteps;
 
@@ -1528,6 +1573,7 @@ function App() {
           return;
         }
 
+        input.preventDefault?.();
         pauseTransportPlayback();
         clearIdleRelease();
 
@@ -1588,8 +1634,9 @@ function App() {
         return;
       }
 
-      const isTyping = key.length === 1 || key === " " || key === "Enter";
-      if (!isTyping) return;
+      if (!isTypingPerformanceInput(input)) {
+        return;
+      }
 
       const audioBuffer = audioBufferRef.current;
       const stepPositions = playableSteps;
@@ -1601,10 +1648,12 @@ function App() {
       const beatIndex = currentBeatIndexRef.current;
 
       if (beatIndex >= stepPositions.length) {
+        input.preventDefault?.();
         setPerformanceStatus("Reached the end of the playable step map.");
         return;
       }
 
+      input.preventDefault?.();
       pauseTransportPlayback();
       clearIdleRelease();
 
@@ -1612,8 +1661,7 @@ function App() {
         return;
       }
 
-      const typedCharacter =
-        key === "Enter" || key === " " ? " " : key.toLowerCase();
+      const typedCharacter = getTypedCharacterFromKey(input.key);
       const expectedCharacter = activePrompt[promptCursor]?.toLowerCase() ?? "";
 
       if (isGameActive && typedCharacter) {
@@ -1767,37 +1815,65 @@ function App() {
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (isRewindKey(event)) {
-        event.preventDefault();
-        processKey("Backspace");
-        return;
-      }
-      if (!isTypingPerformanceKey(event)) return;
-      event.preventDefault();
-      processKey(event.key);
+      handlePerformanceInput({
+        key: event.key,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        repeat: event.repeat,
+        target: event.target,
+        preventDefault: () => event.preventDefault(),
+        source: "window",
+      });
     };
+
+    let globalKeypressUnlisten: UnlistenFn | null = null;
+    let globalKeypressErrorUnlisten: UnlistenFn | null = null;
+    let cancelled = false;
 
     window.addEventListener("keydown", handleKeyDown);
 
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
+    void listen<GlobalKeypressPayload>("global-keypress", (event) => {
+      if (cancelled) {
+        return;
+      }
 
-    if (backgroundMode) {
-      void listen<string>("global-keydown", (event) => {
-        processKey(event.payload);
-      }).then((fn) => {
-        if (cancelled) {
-          fn();
-        } else {
-          unlisten = fn;
-        }
+      setBackgroundTypingState("enabled");
+      setBackgroundTypingMessage("Background typing is on.");
+      handlePerformanceInput({
+        key: event.payload.key,
+        source: "global",
       });
-    }
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+
+      globalKeypressUnlisten = unlisten;
+    });
+
+    void listen<string>("global-keypress-error", (event) => {
+      if (cancelled) {
+        return;
+      }
+
+      setBackgroundTypingState("error");
+      setBackgroundTypingMessage(event.payload);
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+
+      globalKeypressErrorUnlisten = unlisten;
+    });
 
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
       cancelled = true;
-      unlisten?.();
+      window.removeEventListener("keydown", handleKeyDown);
+      globalKeypressUnlisten?.();
+      globalKeypressErrorUnlisten?.();
     };
   }, [
     analysisState,
@@ -1809,8 +1885,33 @@ function App() {
     promptCursor,
     mistakeMode,
     isGameActive,
-    backgroundMode,
   ]);
+
+  const handleEnableBackgroundTyping = async () => {
+    if (backgroundTypingState === "enabled" || backgroundTypingState === "enabling") {
+      return;
+    }
+
+    setBackgroundTypingState("enabling");
+    setBackgroundTypingMessage(
+      "Trying to enable background typing. macOS may ask for permission once.",
+    );
+
+    try {
+      await invoke("enable_background_typing");
+      setBackgroundTypingState("enabled");
+      setBackgroundTypingMessage(
+        "Background typing is on. If macOS asks, allow it, then type in another app.",
+      );
+    } catch (error) {
+      setBackgroundTypingState("error");
+      setBackgroundTypingMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to enable background typing.",
+      );
+    }
+  };
 
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
@@ -2073,36 +2174,6 @@ function App() {
             </div>
           </div>
 
-          <div className="pace-panel">
-            <label className="pace-label" htmlFor="background-mode">
-              Background typing
-            </label>
-            <div className="pace-toggle-row">
-              <span className={`pace-option ${!backgroundMode ? "pace-option-active" : ""}`}>
-                App focused only
-              </span>
-              <button
-                id="background-mode"
-                className={`pace-toggle ${backgroundMode ? "pace-toggle-active" : ""}`}
-                type="button"
-                role="switch"
-                aria-checked={backgroundMode}
-                aria-label="Background typing mode"
-                onClick={() => setBackgroundMode((value) => !value)}
-              >
-                <span className="pace-toggle-knob" />
-              </button>
-              <span className={`pace-option ${backgroundMode ? "pace-option-active" : ""}`}>
-                Any window
-              </span>
-            </div>
-            {backgroundMode && (
-              <p className="prompt-caption">
-                Typing anywhere triggers sounds. Grant accessibility/input monitoring permissions if prompted.
-              </p>
-            )}
-          </div>
-
           <div className="feel-panel">
             <label className="pace-label">Game source</label>
             <div className="mode-switch" role="group" aria-label="Typing game source">
@@ -2123,6 +2194,28 @@ function App() {
               </button>
             </div>
             <p className="prompt-caption">Lyrics mode is disabled for now while sync is rebuilt.</p>
+          </div>
+
+          <div className="pace-panel">
+            <label className="pace-label">Use in background</label>
+            <div className="pace-toggle-row">
+              <button
+                className={`background-button ${
+                  backgroundTypingState === "enabled" ? "background-button-active" : ""
+                }`}
+                type="button"
+                onClick={() => void handleEnableBackgroundTyping()}
+                disabled={backgroundTypingState === "enabled" || backgroundTypingState === "enabling"}
+                aria-label="Enable background typing"
+              >
+                {backgroundTypingState === "enabled"
+                  ? "Background typing on"
+                  : backgroundTypingState === "enabling"
+                    ? "Enabling..."
+                    : "Enable background typing"}
+              </button>
+            </div>
+            <p className="prompt-caption">{backgroundTypingMessage}</p>
           </div>
 
           <div className="prompt-card" aria-live="polite">
