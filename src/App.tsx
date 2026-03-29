@@ -322,7 +322,7 @@ const getTypedCharacter = (event: KeyboardEvent) => {
 const buildPromptStream = (startIndex: number, phraseCount: number) => {
   return Array.from({ length: phraseCount }, (_, index) => {
     return PROMPT_PHRASES[(startIndex + index) % PROMPT_PHRASES.length];
-  }).join("   ");
+  }).join(" ");
 };
 
 const analyzeStepTone = (audioBuffer: AudioBuffer, time: number) => {
@@ -1339,7 +1339,7 @@ function App() {
     }
 
     setPromptStream((currentPrompt) => {
-      return `${currentPrompt}   ${buildPromptStream(nextPromptSeedIndex, 8)}`;
+      return `${currentPrompt} ${buildPromptStream(nextPromptSeedIndex, 8)}`;
     });
     setNextPromptSeedIndex((currentIndex) => {
       return (currentIndex + 8) % PROMPT_PHRASES.length;
