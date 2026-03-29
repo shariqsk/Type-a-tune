@@ -531,9 +531,9 @@ function App() {
     }, Math.round((releaseTime + 0.03) * 1000));
   };
 
-  const duckActiveVoices = (audioContext: AudioContext) => {
+  const duckActiveVoices = (audioContext: AudioContext, releaseTime = typingFeelProfile.duckReleaseTime) => {
     for (const voice of [...activePianoVoicesRef.current]) {
-      releaseVoice(voice, audioContext, typingFeelProfile.duckReleaseTime);
+      releaseVoice(voice, audioContext, releaseTime);
     }
   };
 
@@ -588,10 +588,10 @@ function App() {
     const previewLead = 0.012;
     const sliceStart = Math.max(0, startTime - previewLead);
     const sliceDuration = Math.max(
-      paced ? 0.62 : 0.18,
+      paced ? 0.82 : 0.24,
       Math.min(
-        paced ? 1.28 : 0.52,
-        Math.max(nextTime - sliceStart + (paced ? 0.24 : 0), 0.26),
+        paced ? 1.7 : 0.64,
+        Math.max(nextTime - sliceStart + (paced ? 0.38 : 0.06), 0.34),
       ),
     );
     const safeStart = Math.min(
@@ -603,10 +603,10 @@ function App() {
     sourceNode.buffer = audioBuffer;
     gainNode.gain.cancelScheduledValues(now);
     gainNode.gain.setValueAtTime(0.0001, now);
-    gainNode.gain.linearRampToValueAtTime(0.56, now + 0.012);
+    gainNode.gain.linearRampToValueAtTime(paced ? 0.48 : 0.54, now + (paced ? 0.02 : 0.014));
     gainNode.gain.setValueAtTime(
-      0.56,
-      now + Math.max(paced ? 0.18 : 0.08, safeDuration - (paced ? 0.18 : 0.08)),
+      paced ? 0.48 : 0.54,
+      now + Math.max(paced ? 0.28 : 0.12, safeDuration - (paced ? 0.28 : 0.12)),
     );
     gainNode.gain.linearRampToValueAtTime(0.0001, now + safeDuration);
 
@@ -646,8 +646,8 @@ function App() {
     const nextTime =
       stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.72);
     const noteDuration = paced
-      ? Math.max(1.05, Math.min(2.3, nextTime - startTime + 0.42))
-      : 1.45;
+      ? Math.max(1.45, Math.min(2.8, nextTime - startTime + 0.7))
+      : 1.7;
     const fundamental = midiToFrequency(tone.midi);
     const chordMidis =
       tone.velocity > 0.62
@@ -663,10 +663,10 @@ function App() {
     const noteGains: GainNode[] = [];
 
     masterGain.gain.setValueAtTime(0.0001, now);
-    masterGain.gain.linearRampToValueAtTime(0.64 * tone.velocity, now + 0.016);
+    masterGain.gain.linearRampToValueAtTime(0.58 * tone.velocity, now + 0.024);
     masterGain.gain.exponentialRampToValueAtTime(
-      Math.max(0.075, 0.15 * tone.velocity),
-      now + (paced ? 0.4 : 0.28),
+      Math.max(0.072, 0.13 * tone.velocity),
+      now + (paced ? 0.55 : 0.38),
     );
     masterGain.gain.exponentialRampToValueAtTime(0.0001, now + noteDuration);
 
@@ -677,8 +677,8 @@ function App() {
     hammerFilter.type = "highpass";
     hammerFilter.frequency.value = 1800;
     hammerGain.gain.setValueAtTime(0.0001, now);
-    hammerGain.gain.linearRampToValueAtTime(0.05 * tone.velocity, now + 0.003);
-    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
+    hammerGain.gain.linearRampToValueAtTime(0.028 * tone.velocity, now + 0.004);
+    hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.032);
 
     for (const midi of chordMidis) {
       const frequency = midiToFrequency(midi);
@@ -756,33 +756,13 @@ function App() {
       void ensureAudioContext()
         .then((audioContext) => {
           for (const voice of [...activePianoVoicesRef.current]) {
-            releaseVoice(voice, audioContext, 0.42);
+            releaseVoice(voice, audioContext, 0.82);
           }
         })
         .catch(() => {
           // Idle release is best-effort only.
         });
     }, typingFeelProfile.idleDelayMs);
-  };
-
-  const sustainCurrentStep = async (
-    audioContext: AudioContext,
-    audioBuffer: AudioBuffer,
-    mode: PlaybackMode,
-    startTime: number,
-    stepPositions: number[],
-    stepIndex: number,
-  ) => {
-    if (activePianoVoicesRef.current.length > 0) {
-      return;
-    }
-
-    if (mode === "piano") {
-      await playPianoStep(audioContext, audioBuffer, startTime, stepPositions, stepIndex, true);
-      return;
-    }
-
-    await playRawSliceStep(audioContext, audioBuffer, startTime, stepPositions, stepIndex, true);
   };
 
   const playRewindCue = async (
@@ -1357,24 +1337,8 @@ function App() {
         lastPlayedStepIndexRef.current === stepIndexToPlay;
 
       if (paceLockEnabled && isDuplicateStep) {
-        void (async () => {
-          try {
-            const audioContext = await ensureAudioContext();
-            await sustainCurrentStep(
-              audioContext,
-              audioBuffer,
-              playbackMode,
-              startTime,
-              stepPositions,
-              stepIndexToPlay,
-            );
-            scheduleIdleRelease();
-          } catch {
-            // Holding the current step is best-effort only.
-          }
-        })();
-
         setLastTriggeredBeat(startTime);
+        scheduleIdleRelease();
         setPerformanceStatus(
           `Holding step ${stepIndexToPlay + 1} of ${stepPositions.length} at the song's pace.`,
         );
@@ -1395,7 +1359,12 @@ function App() {
         try {
           const audioContext = await ensureAudioContext();
 
-          duckActiveVoices(audioContext);
+          duckActiveVoices(
+            audioContext,
+            paceLockEnabled
+              ? Math.max(typingFeelProfile.duckReleaseTime, 0.2)
+              : typingFeelProfile.duckReleaseTime,
+          );
           let playedLabel = "Song slice";
 
           if (playbackMode === "piano") {
