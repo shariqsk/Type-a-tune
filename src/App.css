@@ -124,6 +124,40 @@ h1 {
   color: rgba(245, 237, 224, 0.6);
 }
 
+.dropzone-status {
+  margin-top: 28px;
+  padding: 18px 20px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(245, 237, 224, 0.08);
+}
+
+.status-label {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.74rem;
+  color: rgba(245, 237, 224, 0.56);
+}
+
+.status-file {
+  margin: 8px 0 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #f8dab1;
+  word-break: break-word;
+}
+
+.status-placeholder {
+  margin: 0;
+  color: rgba(245, 237, 224, 0.54);
+}
+
+.status-error {
+  margin: 12px 0 0;
+  color: #ffb8a8;
+}
+
 @media (max-width: 640px) {
   .shell {
     padding: 32px 18px;
