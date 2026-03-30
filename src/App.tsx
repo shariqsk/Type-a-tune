@@ -586,6 +586,7 @@ function App() {
   const [lastTriggeredBeat, setLastTriggeredBeat] = useState<number | null>(null);
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
   const [isUiPulseActive, setIsUiPulseActive] = useState(false);
+  const [isTypingBoothOpen, setIsTypingBoothOpen] = useState(false);
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
@@ -595,6 +596,24 @@ function App() {
   const promptWindowEnd = Math.min(activePrompt.length, promptCursor + 96);
   const visiblePrompt = activePrompt.slice(promptWindowStart, promptWindowEnd);
   const visibleCursorIndex = Math.max(0, promptCursor - promptWindowStart);
+
+  useEffect(() => {
+    if (!isTypingBoothOpen) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsTypingBoothOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [isTypingBoothOpen]);
 
   const handleDragState = (isActive: boolean) => {
     setIsDragActive(isActive);
@@ -1957,340 +1976,348 @@ function App() {
 
   const beatPreview = analysisResult?.beatPositions.slice(0, 16) ?? [];
   const peakPreview = analysisResult?.energyPeaks.slice(0, 12) ?? [];
+  const typingFeelIndex = TYPING_FEELS.indexOf(typingFeel);
+  const mistakeModeIndex = MISTAKE_MODES.indexOf(mistakeMode);
+  const boothCaption = isGameActive
+    ? mistakeMode === "off"
+      ? "The booth is live with mistakes ignored."
+      : "Type the line exactly, including spaces, to keep the rhythm clean."
+    : "Open the booth when you want the typing line in focus.";
 
   return (
     <main className="shell shell-ready">
-      <section className="hero hero-ready">
-        <p className="eyebrow">Type-a-tune</p>
-        <h1>Drop a song or start typing</h1>
-        <p className="subtitle">
-          Turn each keystroke into a piano performance, one note at a time.
-        </p>
-      </section>
+      <section className="app-shell">
+        <div className="workspace-grid">
+          <section
+            ref={dropzoneRef}
+            className={`panel track-panel ${isDragActive ? "track-panel-active" : ""}`}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              handleDragState(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              handleDragState(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              handleDragState(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              handleDragState(false);
 
-      <section
-        ref={dropzoneRef}
-        className={`dropzone ${isDragActive ? "dropzone-active" : ""}`}
-        onDragEnter={(event) => {
-          event.preventDefault();
-          handleDragState(true);
-        }}
-        onDragOver={(event) => {
-          event.preventDefault();
-          handleDragState(true);
-        }}
-        onDragLeave={(event) => {
-          event.preventDefault();
-          handleDragState(false);
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          handleDragState(false);
+              const droppedFile = Array.from(event.dataTransfer.files).find((file) =>
+                isMp3File(file.name),
+              );
 
-          const droppedFile = Array.from(event.dataTransfer.files).find((file) =>
-            isMp3File(file.name),
-          );
+              if (!droppedFile) {
+                handleUploadError("Only MP3 files are supported right now.");
+                return;
+              }
 
-          if (!droppedFile) {
-            handleUploadError("Only MP3 files are supported right now.");
-            return;
-          }
-
-          loadFileIntoMemory(droppedFile);
-        }}
-      >
-        <input
-          ref={fileInputRef}
-          className="file-input"
-          type="file"
-          accept=".mp3,audio/mpeg"
-          onChange={(event) => {
-            const selectedFile = event.currentTarget.files?.[0];
-
-            if (selectedFile) {
-              loadFileIntoMemory(selectedFile);
-            }
-
-            event.currentTarget.value = "";
-          }}
-        />
-        <div className="dropzone-icon" aria-hidden="true">
-          ♪
-        </div>
-        <p className="dropzone-title">Drag and drop an MP3 here</p>
-        <p className="dropzone-caption">
-          {uploadedSong
-            ? uploadedSong.isDefault
-              ? "A bundled piano demo is loaded by default until you replace it."
-              : "The song is loaded into app memory for this session."
-            : "Your uploaded song stays in app memory for this session."}
-        </p>
-
-        <button
-          className="browse-button"
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          Choose MP3
-        </button>
-
-        <div className="dropzone-status" aria-live="polite">
-          {uploadedSong ? (
-            <>
-              <p className="status-label">
-                {uploadedSong.isDefault ? "Default song" : "Loaded song"}
-              </p>
-              <p className="status-file">{uploadedSong.name}</p>
-              <p className="status-meta">
-                Web Audio buffer: {audioState} • {formatTime(trackDuration)}
-              </p>
-              <p className="status-meta">
-                Playable steps: {playableSteps.length}
-              </p>
-            </>
-          ) : (
-            <p className="status-placeholder">No song selected yet.</p>
-          )}
-
-          {uploadError ? <p className="status-error">{uploadError}</p> : null}
-          {audioError ? <p className="status-error">{audioError}</p> : null}
-        </div>
-
-        <div className="transport">
-          <button
-            className="transport-button"
-            type="button"
-            disabled={audioState === "idle" || audioState === "loading"}
-            onClick={audioState === "playing" ? handlePause : () => void handlePlay()}
+              loadFileIntoMemory(droppedFile);
+            }}
           >
-            {audioState === "loading"
-              ? "Loading audio..."
-              : audioState === "playing"
-                ? "Pause"
-                : "Play"}
-          </button>
-          <p className="transport-caption">
-            Use this to confirm the MP3 decodes and plays cleanly before we move
-            into beat analysis.
-          </p>
-        </div>
+            <input
+              ref={fileInputRef}
+              className="file-input"
+              type="file"
+              accept=".mp3,audio/mpeg"
+              onChange={(event) => {
+                const selectedFile = event.currentTarget.files?.[0];
 
-        <section
-          className={`typing-panel ${isUiPulseActive ? "typing-panel-pulse" : ""}`}
-          aria-live="polite"
-        >
-          <p className="analysis-label">Typing progression</p>
-          <p className="analysis-summary">{performanceStatus}</p>
+                if (selectedFile) {
+                  loadFileIntoMemory(selectedFile);
+                }
 
-          <div className="mode-switch" role="group" aria-label="Typing playback mode">
-            <button
-              className={`mode-button ${playbackMode === "slices" ? "mode-button-active" : ""}`}
-              type="button"
-              onClick={() => setPlaybackMode("slices")}
-            >
-              Song slices
-            </button>
-            <button
-              className={`mode-button ${playbackMode === "piano" ? "mode-button-active" : ""}`}
-              type="button"
-              onClick={() => setPlaybackMode("piano")}
-            >
-              Piano interpretation
-            </button>
-          </div>
+                event.currentTarget.value = "";
+              }}
+            />
 
-          <div className="pace-panel">
-            <label className="pace-label" htmlFor="pace-lock">
-              Pace control
-            </label>
-            <div className="pace-toggle-row">
-              <span className={`pace-option ${!isPaceLocked ? "pace-option-active" : ""}`}>
-                Follow typing
-              </span>
+            <div className="panel-head">
+              <div>
+                <p className="panel-label">Track deck</p>
+                <h2 className="panel-title">Load the song</h2>
+              </div>
+            </div>
+
+            <div className="dropzone-card">
+              <div className="dropzone-icon" aria-hidden="true">
+                ♪
+              </div>
+              <p className="dropzone-title">Drag and drop an MP3 here</p>
+              <p className="dropzone-caption">
+                {uploadedSong
+                  ? uploadedSong.isDefault
+                    ? "The bundled piano demo is ready until you replace it."
+                    : "Your song is loaded into memory for this session."
+                  : "Your uploaded song stays in app memory for this session."}
+              </p>
+
               <button
-                id="pace-lock"
-                className={`pace-toggle ${isPaceLocked ? "pace-toggle-active" : ""}`}
+                className="browse-button"
                 type="button"
-                role="switch"
-                aria-checked={isPaceLocked}
-                aria-label="Keep song pace"
-                onClick={() => setIsPaceLocked((value) => !value)}
+                onClick={() => fileInputRef.current?.click()}
               >
-                <span className="pace-toggle-knob" />
-              </button>
-              <span className={`pace-option ${isPaceLocked ? "pace-option-active" : ""}`}>
-                Keep song pace
-              </span>
-            </div>
-          </div>
-
-          <div className="feel-panel">
-            <label className="pace-label" htmlFor="typing-feel">
-              Typing feel
-            </label>
-            <div className="feel-slider-wrap">
-              <input
-                id="typing-feel"
-                className="feel-slider"
-                type="range"
-                min="0"
-                max="2"
-                step="1"
-                value={TYPING_FEELS.indexOf(typingFeel)}
-                aria-label="Typing feel"
-                onChange={(event) => {
-                  const nextFeel = TYPING_FEELS[Number(event.currentTarget.value)] ?? "normal";
-                  setTypingFeel(nextFeel);
-                }}
-              />
-            </div>
-            <div className="feel-labels" aria-hidden="true">
-              <span className={typingFeel === "slow" ? "feel-label-active" : ""}>Slow</span>
-              <span className={typingFeel === "normal" ? "feel-label-active" : ""}>Normal</span>
-              <span className={typingFeel === "high" ? "feel-label-active" : ""}>High</span>
-            </div>
-          </div>
-
-          <div className="feel-panel">
-            <label className="pace-label" htmlFor="mistake-mode">
-              Mistake mode
-            </label>
-            <div className="feel-slider-wrap">
-              <input
-                id="mistake-mode"
-                className="feel-slider"
-                type="range"
-                min="0"
-                max="2"
-                step="1"
-                value={MISTAKE_MODES.indexOf(mistakeMode)}
-                aria-label="Mistake mode"
-                onChange={(event) => {
-                  const nextMode =
-                    MISTAKE_MODES[Number(event.currentTarget.value)] ?? "normal";
-                  setMistakeMode(nextMode);
-                }}
-              />
-            </div>
-            <div className="feel-labels" aria-hidden="true">
-              <span className={mistakeMode === "off" ? "feel-label-active" : ""}>Off</span>
-              <span className={mistakeMode === "normal" ? "feel-label-active" : ""}>Normal</span>
-              <span className={mistakeMode === "strict" ? "feel-label-active" : ""}>Strict</span>
-            </div>
-          </div>
-
-          <div className="feel-panel">
-            <label className="pace-label">Game source</label>
-            <div className="mode-switch" role="group" aria-label="Typing game source">
-              <button
-                className={`mode-button ${gameSourceMode === "flow" ? "mode-button-active" : ""}`}
-                type="button"
-                onClick={() => setGameSourceMode("flow")}
-              >
-                Flow lane
-              </button>
-              <button
-                className="mode-button mode-button-disabled"
-                type="button"
-                disabled
-                aria-disabled="true"
-              >
-                Lyrics mode (WIP)
+                Choose MP3
               </button>
             </div>
-            <p className="prompt-caption">Lyrics mode is disabled for now while sync is rebuilt.</p>
-          </div>
 
-          <div className="pace-panel">
-            <label className="pace-label">Use in background</label>
-            <div className="pace-toggle-row">
+            <div className="dropzone-status" aria-live="polite">
+              {uploadedSong ? (
+                <>
+                  <p className="status-label">
+                    {uploadedSong.isDefault ? "Default song" : "Loaded song"}
+                  </p>
+                  <p className="status-file">{uploadedSong.name}</p>
+                  <p className="status-meta">
+                    Web Audio buffer: {audioState} • {formatTime(trackDuration)}
+                  </p>
+                  <p className="status-meta">
+                    Playable steps: {playableSteps.length}
+                  </p>
+                </>
+              ) : (
+                <p className="status-placeholder">No song selected yet.</p>
+              )}
+
+              {uploadError ? <p className="status-error">{uploadError}</p> : null}
+              {audioError ? <p className="status-error">{audioError}</p> : null}
+            </div>
+
+            <div className="transport transport-inline">
               <button
-                className={`background-button ${
-                  backgroundTypingState === "enabled" ? "background-button-active" : ""
-                }`}
+                className="transport-button"
                 type="button"
-                onClick={() => void handleEnableBackgroundTyping()}
-                disabled={backgroundTypingState === "enabled" || backgroundTypingState === "enabling"}
-                aria-label="Enable background typing"
+                disabled={audioState === "idle" || audioState === "loading"}
+                onClick={audioState === "playing" ? handlePause : () => void handlePlay()}
               >
-                {backgroundTypingState === "enabled"
-                  ? "Background typing on"
-                  : backgroundTypingState === "enabling"
-                    ? "Enabling..."
-                    : "Enable background typing"}
+                {audioState === "loading"
+                  ? "Loading audio..."
+                  : audioState === "playing"
+                    ? "Pause"
+                    : "Play"}
+              </button>
+              <p className="transport-caption">
+                Preview the track here before using it for rhythm analysis and typing.
+              </p>
+            </div>
+          </section>
+
+          <section
+            className={`panel control-panel ${isUiPulseActive ? "control-panel-pulse" : ""}`}
+            aria-live="polite"
+          >
+            <div className="panel-head">
+              <div>
+                <p className="panel-label">Performance desk</p>
+                <h2 className="panel-title">Shape the response</h2>
+              </div>
+            </div>
+
+            <p className="analysis-summary">{performanceStatus}</p>
+
+            <div className="mode-switch" role="group" aria-label="Typing playback mode">
+              <button
+                className={`mode-button ${playbackMode === "slices" ? "mode-button-active" : ""}`}
+                type="button"
+                onClick={() => setPlaybackMode("slices")}
+              >
+                Song slices
+              </button>
+              <button
+                className={`mode-button ${playbackMode === "piano" ? "mode-button-active" : ""}`}
+                type="button"
+                onClick={() => setPlaybackMode("piano")}
+              >
+                Piano interpretation
               </button>
             </div>
-            <p className="prompt-caption">{backgroundTypingMessage}</p>
-          </div>
 
-          <div className="prompt-card" aria-live="polite">
-            <div className="prompt-header">
-              <p className="prompt-label">Typing game</p>
+            <div className="control-grid">
+              <div className="pace-panel">
+                <label className="pace-label" htmlFor="pace-lock">
+                  Pace control
+                </label>
+                <div className="pace-toggle-row">
+                  <span className={`pace-option ${!isPaceLocked ? "pace-option-active" : ""}`}>
+                    Follow typing
+                  </span>
+                  <button
+                    id="pace-lock"
+                    className={`pace-toggle ${isPaceLocked ? "pace-toggle-active" : ""}`}
+                    type="button"
+                    role="switch"
+                    aria-checked={isPaceLocked}
+                    aria-label="Keep song pace"
+                    onClick={() => setIsPaceLocked((value) => !value)}
+                  >
+                    <span className="pace-toggle-knob" />
+                  </button>
+                  <span className={`pace-option ${isPaceLocked ? "pace-option-active" : ""}`}>
+                    Keep song pace
+                  </span>
+                </div>
+              </div>
+
+              <div className="feel-panel">
+                <label className="pace-label" htmlFor="typing-feel">
+                  Typing feel
+                </label>
+                <div className="feel-slider-wrap">
+                  <input
+                    id="typing-feel"
+                    className="feel-slider"
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="1"
+                    value={typingFeelIndex}
+                    aria-label="Typing feel"
+                    onChange={(event) => {
+                      const nextFeel = TYPING_FEELS[Number(event.currentTarget.value)] ?? "normal";
+                      setTypingFeel(nextFeel);
+                    }}
+                  />
+                </div>
+                <div className="feel-labels" aria-hidden="true">
+                  <span className={typingFeel === "slow" ? "feel-label-active" : ""}>Slow</span>
+                  <span className={typingFeel === "normal" ? "feel-label-active" : ""}>Normal</span>
+                  <span className={typingFeel === "high" ? "feel-label-active" : ""}>High</span>
+                </div>
+              </div>
+
+              <div className="feel-panel">
+                <label className="pace-label" htmlFor="mistake-mode">
+                  Mistake mode
+                </label>
+                <div className="feel-slider-wrap">
+                  <input
+                    id="mistake-mode"
+                    className="feel-slider"
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="1"
+                    value={mistakeModeIndex}
+                    aria-label="Mistake mode"
+                    onChange={(event) => {
+                      const nextMode =
+                        MISTAKE_MODES[Number(event.currentTarget.value)] ?? "normal";
+                      setMistakeMode(nextMode);
+                    }}
+                  />
+                </div>
+                <div className="feel-labels" aria-hidden="true">
+                  <span className={mistakeMode === "off" ? "feel-label-active" : ""}>Off</span>
+                  <span className={mistakeMode === "normal" ? "feel-label-active" : ""}>Normal</span>
+                  <span className={mistakeMode === "strict" ? "feel-label-active" : ""}>Strict</span>
+                </div>
+              </div>
+
+              <div className="feel-panel">
+                <label className="pace-label">Game source</label>
+                <div className="mode-switch" role="group" aria-label="Typing game source">
+                  <button
+                    className={`mode-button ${gameSourceMode === "flow" ? "mode-button-active" : ""}`}
+                    type="button"
+                    onClick={() => setGameSourceMode("flow")}
+                  >
+                    Flow lane
+                  </button>
+                  <button
+                    className="mode-button mode-button-disabled"
+                    type="button"
+                    disabled
+                    aria-disabled="true"
+                  >
+                    Lyrics mode (WIP)
+                  </button>
+                </div>
+                <p className="prompt-caption">Lyrics mode is disabled for now while sync is rebuilt.</p>
+              </div>
+            </div>
+
+            <div className="background-panel">
+              <label className="pace-label">Use in background</label>
+              <div className="pace-toggle-row">
+                <button
+                  className={`background-button ${
+                    backgroundTypingState === "enabled" ? "background-button-active" : ""
+                  }`}
+                  type="button"
+                  onClick={() => void handleEnableBackgroundTyping()}
+                  disabled={backgroundTypingState === "enabled" || backgroundTypingState === "enabling"}
+                  aria-label="Enable background typing"
+                >
+                  {backgroundTypingState === "enabled"
+                    ? "Background typing on"
+                    : backgroundTypingState === "enabling"
+                      ? "Enabling..."
+                      : "Enable background typing"}
+                </button>
+              </div>
+              <p className="prompt-caption">{backgroundTypingMessage}</p>
+            </div>
+
+            <div className="booth-launch">
+              <div>
+                <p className="prompt-label">Typing booth</p>
+                <p className="booth-title">Open the live line in a focused pop-up.</p>
+                <p className="prompt-caption">{boothCaption}</p>
+              </div>
               <div className="prompt-actions">
                 <button
                   className="prompt-button"
                   type="button"
-                  onClick={() => setIsGameActive((current) => !current)}
+                  onClick={() => setIsTypingBoothOpen(true)}
                 >
-                  {isGameActive ? "Pause game" : "Play game"}
+                  Open booth
                 </button>
                 <button
                   className="prompt-button prompt-button-secondary"
                   type="button"
                   onClick={resetPromptGame}
                 >
-                  Reset
+                  Reset lane
                 </button>
               </div>
             </div>
-            <div className="prompt-stream-viewport" aria-hidden="true">
-              <div className={`prompt-stream-track ${isGameActive ? "prompt-stream-active" : ""}`}>
-                <span className="prompt-done">{visiblePrompt.slice(0, visibleCursorIndex)}</span>
-                <span className="prompt-current">
-                  {activePrompt[promptCursor] ?? " "}
-                </span>
-                <span className="prompt-remaining">
-                  {visiblePrompt.slice(visibleCursorIndex + 1)}
-                </span>
+
+            <div className="typing-stats">
+              <div className="typing-stat">
+                <p className="typing-stat-label">Current step</p>
+                <p className="typing-stat-value">
+                  {performanceStep}/{playableSteps.length}
+                </p>
+              </div>
+
+              <div className="typing-stat">
+                <p className="typing-stat-label">Last beat</p>
+                <p className="typing-stat-value">
+                  {lastTriggeredBeat === null ? "--:--" : `${lastTriggeredBeat.toFixed(2)}s`}
+                </p>
+              </div>
+
+              <div className="typing-stat">
+                <p className="typing-stat-label">
+                  {playbackMode === "piano" ? "Last note" : "Last mode"}
+                </p>
+                <p className="typing-stat-value">{lastPianoNote}</p>
               </div>
             </div>
-            <p className="prompt-caption">
-              {isGameActive
-                ? mistakeMode === "off"
-                  ? "Game is running with mistakes turned off."
-                  : "Type the scrolling line exactly, including spaces."
-                : gameSourceMode === "lyrics"
-                  ? "Lyrics mode is disabled for now."
-                  : "Press Play game to start the scrolling typing lane."}
-            </p>
-          </div>
+          </section>
+        </div>
 
-          <div className="typing-stats">
-            <div className="typing-stat">
-              <p className="typing-stat-label">Current step</p>
-              <p className="typing-stat-value">
-                {performanceStep}/{playableSteps.length}
-              </p>
-            </div>
-
-            <div className="typing-stat">
-              <p className="typing-stat-label">Last beat</p>
-              <p className="typing-stat-value">
-                {lastTriggeredBeat === null ? "--:--" : `${lastTriggeredBeat.toFixed(2)}s`}
-              </p>
-            </div>
-
-            <div className="typing-stat">
-              <p className="typing-stat-label">
-                {playbackMode === "piano" ? "Last note" : "Last mode"}
-              </p>
-              <p className="typing-stat-value">{lastPianoNote}</p>
+        <section className="analysis-panel panel" aria-live="polite">
+          <div className="panel-head">
+            <div>
+              <p className="panel-label">Rhythm analysis</p>
+              <h2 className="panel-title">Pulse map</h2>
             </div>
           </div>
-        </section>
 
-        <section className="analysis-panel" aria-live="polite">
-          <p className="analysis-label">Rhythm analysis</p>
           <p className="analysis-summary">
             {analysisState === "idle" && "Load a song to analyze its tempo and beats."}
             {analysisState === "loading" && "Analyzing tempo, beat markers, and energy peaks..."}
@@ -2329,6 +2356,70 @@ function App() {
           ) : null}
         </section>
       </section>
+
+      {isTypingBoothOpen ? (
+        <div
+          className="typing-booth-backdrop"
+          role="presentation"
+          onClick={() => setIsTypingBoothOpen(false)}
+        >
+          <section
+            className="typing-booth"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Typing booth"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="booth-header">
+              <div>
+                <p className="prompt-label">Typing booth</p>
+                <p className="booth-title">Focused typing lane</p>
+              </div>
+              <button
+                className="prompt-button prompt-button-secondary"
+                type="button"
+                onClick={() => setIsTypingBoothOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="prompt-card" aria-live="polite">
+              <div className="prompt-header">
+                <p className="prompt-label">Typing game</p>
+                <div className="prompt-actions">
+                  <button
+                    className="prompt-button"
+                    type="button"
+                    onClick={() => setIsGameActive((current) => !current)}
+                  >
+                    {isGameActive ? "Pause game" : "Play game"}
+                  </button>
+                  <button
+                    className="prompt-button prompt-button-secondary"
+                    type="button"
+                    onClick={resetPromptGame}
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+              <div className="prompt-stream-viewport" aria-hidden="true">
+                <div className={`prompt-stream-track ${isGameActive ? "prompt-stream-active" : ""}`}>
+                  <span className="prompt-done">{visiblePrompt.slice(0, visibleCursorIndex)}</span>
+                  <span className="prompt-current">
+                    {activePrompt[promptCursor] ?? " "}
+                  </span>
+                  <span className="prompt-remaining">
+                    {visiblePrompt.slice(visibleCursorIndex + 1)}
+                  </span>
+                </div>
+              </div>
+              <p className="prompt-caption">{boothCaption}</p>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
