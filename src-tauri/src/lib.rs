@@ -5,7 +5,7 @@ use std::sync::{
     mpsc,
     Arc, Mutex,
 };
-use tauri::{Emitter, State};
+use tauri::{Emitter, State, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
 #[derive(Serialize, Clone)]
 struct GlobalKeypressPayload {
@@ -172,6 +172,40 @@ pub fn run() {
             started: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![read_audio_file, enable_background_typing])
+        .setup(|app| {
+            let window_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("Type-a-tune")
+                .inner_size(800.0, 640.0)
+                .min_inner_size(760.0, 580.0);
+
+            #[cfg(target_os = "macos")]
+            let window_builder = window_builder
+                .title_bar_style(TitleBarStyle::Transparent)
+                .theme(Some(tauri::Theme::Light));
+
+            let window = window_builder.build()?;
+
+            #[cfg(target_os = "macos")]
+            {
+                use cocoa::appkit::{NSColor, NSWindow};
+                use cocoa::base::{id, nil};
+
+                let ns_window = window.ns_window().map_err(|error| error.to_string())? as id;
+
+                unsafe {
+                    let white = NSColor::colorWithRed_green_blue_alpha_(
+                        nil,
+                        1.0,
+                        1.0,
+                        1.0,
+                        1.0,
+                    );
+                    ns_window.setBackgroundColor_(white);
+                }
+            }
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

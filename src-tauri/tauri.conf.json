@@ -10,15 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Type-a-tune",
-        "width": 800,
-        "height": 640,
-        "minWidth": 760,
-        "minHeight": 580
-      }
-    ],
     "security": {
       "csp": null
     }
