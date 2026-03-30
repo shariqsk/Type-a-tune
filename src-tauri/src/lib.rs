@@ -163,6 +163,11 @@ fn enable_background_typing(
     });
 }
 
+#[tauri::command]
+fn disable_background_typing(state: State<BackgroundListenerState>) {
+    state.enabled.store(false, Ordering::Relaxed);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -171,7 +176,11 @@ pub fn run() {
             enabled: Arc::new(AtomicBool::new(false)),
             started: Arc::new(AtomicBool::new(false)),
         })
-        .invoke_handler(tauri::generate_handler![read_audio_file, enable_background_typing])
+        .invoke_handler(tauri::generate_handler![
+            read_audio_file,
+            enable_background_typing,
+            disable_background_typing
+        ])
         .setup(|app| {
             let window_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Type-a-tune")

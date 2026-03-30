@@ -21,7 +21,7 @@ type AnalysisResult = {
 };
 
 type PlaybackMode = "slices" | "piano";
-type TypingFeel = "slow" | "normal" | "high";
+type TypingFeel = "slowest" | "slow" | "normal" | "high";
 type MistakeMode = "off" | "normal" | "strict";
 type GameSourceMode = "flow" | "lyrics";
 
@@ -69,7 +69,7 @@ type PersistedSong = {
 
 const MIN_BPM = 70;
 const MAX_BPM = 170;
-const TYPING_FEELS: TypingFeel[] = ["slow", "normal", "high"];
+const TYPING_FEELS: TypingFeel[] = ["slowest", "slow", "normal", "high"];
 const MISTAKE_MODES: MistakeMode[] = ["off", "normal", "strict"];
 const INITIAL_PROMPT_WORD_COUNT = 96;
 const APPEND_PROMPT_WORD_COUNT = 48;
@@ -542,11 +542,21 @@ const clampMidi = (midi: number) => Math.max(36, Math.min(84, midi));
 
 const getTypingFeelProfile = (typingFeel: TypingFeel) => {
   switch (typingFeel) {
+    case "slowest":
+      return {
+        triggerGateMs: 72,
+        duckReleaseTime: 0.32,
+        idleDelayMs: 3500,
+        pacedWindowMs: 3500,
+        sliceTailMaxDuration: 3.2,
+        pianoTailDuration: 4.2,
+      };
     case "slow":
       return {
         triggerGateMs: 36,
         duckReleaseTime: 0.14,
         idleDelayMs: 1250,
+        pacedWindowMs: 2400,
         sliceTailMaxDuration: 1.45,
         pianoTailDuration: 2.9,
       };
@@ -555,6 +565,7 @@ const getTypingFeelProfile = (typingFeel: TypingFeel) => {
         triggerGateMs: 24,
         duckReleaseTime: 0.08,
         idleDelayMs: 620,
+        pacedWindowMs: 1100,
         sliceTailMaxDuration: 0.92,
         pianoTailDuration: 1.95,
       };
@@ -564,6 +575,7 @@ const getTypingFeelProfile = (typingFeel: TypingFeel) => {
         triggerGateMs: 30,
         duckReleaseTime: 0.11,
         idleDelayMs: 920,
+        pacedWindowMs: 1700,
         sliceTailMaxDuration: 1.18,
         pianoTailDuration: 2.45,
       };
@@ -686,6 +698,8 @@ function App() {
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const activePianoVoicesRef = useRef<PianoVoice[]>([]);
   const idleReleaseTimerRef = useRef<number | null>(null);
+  const pacedPlaybackTimerRef = useRef<number | null>(null);
+  const pacedPlaybackUntilRef = useRef(0);
   const uiPulseTimerRef = useRef<number | null>(null);
   const performanceClockRef = useRef<PerformanceClock | null>(null);
   const lastPlayedStepIndexRef = useRef<number | null>(null);
@@ -738,6 +752,7 @@ function App() {
   const [lastPianoNote, setLastPianoNote] = useState<string>("--");
   const [isUiPulseActive, setIsUiPulseActive] = useState(false);
   const [isTypingBoothOpen, setIsTypingBoothOpen] = useState(false);
+  const [isPulseInfoOpen, setIsPulseInfoOpen] = useState(false);
   const [performanceStatus, setPerformanceStatus] = useState(
     "Load a song and start typing to step through detected beats.",
   );
@@ -971,6 +986,22 @@ function App() {
     }
   };
 
+  const trimActiveVoices = (
+    audioContext: AudioContext,
+    maxVoices: number,
+    releaseTime = typingFeelProfile.duckReleaseTime,
+  ) => {
+    const overflow = activePianoVoicesRef.current.length - maxVoices;
+
+    if (overflow <= 0) {
+      return;
+    }
+
+    for (const voice of activePianoVoicesRef.current.slice(0, overflow)) {
+      releaseVoice(voice, audioContext, releaseTime);
+    }
+  };
+
   const clearIdleRelease = () => {
     if (idleReleaseTimerRef.current !== null) {
       window.clearTimeout(idleReleaseTimerRef.current);
@@ -978,20 +1009,19 @@ function App() {
     }
   };
 
+  const clearPacedPlaybackTimer = () => {
+    if (pacedPlaybackTimerRef.current !== null) {
+      window.clearTimeout(pacedPlaybackTimerRef.current);
+      pacedPlaybackTimerRef.current = null;
+    }
+  };
+
   const resetPerformanceClock = () => {
+    clearPacedPlaybackTimer();
+    pacedPlaybackUntilRef.current = 0;
     performanceClockRef.current = null;
     lastPlayedStepIndexRef.current = null;
     pendingStepIndexRef.current = null;
-  };
-
-  const findPacedStepIndex = (stepPositions: number[], songTime: number) => {
-    let index = 0;
-
-    while (index < stepPositions.length - 1 && stepPositions[index + 1] <= songTime) {
-      index += 1;
-    }
-
-    return index;
   };
 
   const canAcceptTriggerBurst = () => {
@@ -1043,13 +1073,15 @@ function App() {
       stepPositions[beatIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.52);
     const previewLead = 0.012;
     const sliceStart = Math.max(0, startTime - previewLead);
-    const sliceDuration = Math.max(
-      paced ? 0.82 : 0.24,
-      Math.min(
-        paced ? 1.7 : 0.64,
-        Math.max(nextTime - sliceStart + (paced ? 0.38 : 0.06), 0.34),
-      ),
-    );
+    const sliceDuration = paced
+      ? typingFeelProfile.sliceTailMaxDuration
+      : Math.max(
+          0.24,
+          Math.min(
+            Math.max(0.92, typingFeelProfile.sliceTailMaxDuration * 0.78),
+            Math.max(nextTime - sliceStart + 0.06, 0.34),
+          ),
+        );
     const safeStart = Math.min(
       Math.max(0, sliceStart),
       Math.max(0, audioBuffer.duration - 0.02),
@@ -1092,18 +1124,14 @@ function App() {
     audioContext: AudioContext,
     audioBuffer: AudioBuffer,
     startTime: number,
-    stepPositions: number[],
-    stepIndex: number,
     paced: boolean,
   ) => {
     const tone = analyzeStepTone(audioBuffer, startTime);
     const now = audioContext.currentTime;
     const outputChain = ensureOutputChain(audioContext);
-    const nextTime =
-      stepPositions[stepIndex + 1] ?? Math.min(audioBuffer.duration, startTime + 0.72);
     const noteDuration = paced
-      ? Math.max(1.45, Math.min(2.8, nextTime - startTime + 0.7))
-      : 1.7;
+      ? typingFeelProfile.pianoTailDuration
+      : Math.max(1.6, typingFeelProfile.pianoTailDuration * 0.86);
     const fundamental = midiToFrequency(tone.midi);
     const chordMidis =
       tone.velocity > 0.62
@@ -1303,6 +1331,132 @@ function App() {
         });
     }, typingFeelProfile.idleDelayMs);
   };
+
+  const performStepPlayback = async (
+    audioBuffer: AudioBuffer,
+    stepPositions: number[],
+    stepIndexToPlay: number,
+    paced: boolean,
+    statusMessage?: (playedLabel: string) => string,
+  ) => {
+    const startTime = stepPositions[stepIndexToPlay];
+    currentBeatIndexRef.current = Math.max(currentBeatIndexRef.current, stepIndexToPlay + 1);
+    setPerformanceStep(currentBeatIndexRef.current);
+    pendingStepIndexRef.current = stepIndexToPlay;
+
+    try {
+      const audioContext = await ensureAudioContext();
+
+      duckActiveVoices(audioContext, typingFeelProfile.duckReleaseTime);
+      trimActiveVoices(
+        audioContext,
+        playbackMode === "piano" ? 2 : 1,
+        Math.min(typingFeelProfile.duckReleaseTime, 0.1),
+      );
+      let playedLabel = "Song slice";
+
+      if (playbackMode === "piano") {
+        playedLabel = await playPianoStep(audioContext, audioBuffer, startTime, paced);
+      } else {
+        await playRawSliceStep(
+          audioContext,
+          audioBuffer,
+          startTime,
+          stepPositions,
+          stepIndexToPlay,
+          paced,
+        );
+      }
+
+      lastPlayedStepIndexRef.current = stepIndexToPlay;
+      if (pendingStepIndexRef.current === stepIndexToPlay) {
+        pendingStepIndexRef.current = null;
+      }
+      setLastTriggeredBeat(startTime);
+      setLastPianoNote(playedLabel);
+      triggerUiPulse();
+      setAudioError(null);
+      setPerformanceStatus(
+        statusMessage?.(playedLabel) ??
+          `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
+      );
+      scheduleIdleRelease();
+    } catch (error) {
+      if (pendingStepIndexRef.current === stepIndexToPlay) {
+        pendingStepIndexRef.current = null;
+      }
+      setPerformanceStatus(
+        playbackMode === "piano"
+          ? "Unable to play the piano interpretation."
+          : "Unable to play the song slice mode.",
+      );
+      setAudioError(
+        error instanceof Error
+          ? error.message
+          : playbackMode === "piano"
+            ? "Piano playback failed."
+            : "Song slice playback failed.",
+      );
+    }
+  };
+
+  const scheduleNextPacedStep = () => {
+    if (pacedPlaybackTimerRef.current !== null) {
+      return;
+    }
+
+    const audioBuffer = audioBufferRef.current;
+    const clock = performanceClockRef.current;
+    const nextStepIndex = currentBeatIndexRef.current;
+
+    if (
+      !isPaceLocked ||
+      !audioBuffer ||
+      analysisState !== "ready" ||
+      !clock ||
+      Date.now() >= pacedPlaybackUntilRef.current ||
+      nextStepIndex >= playableSteps.length
+    ) {
+      return;
+    }
+
+    const nextStepSongTime = playableSteps[nextStepIndex];
+    const dueAt =
+      clock.wallStartTime + Math.max(0, (nextStepSongTime - clock.songStartTime) * 1000);
+    const delayMs = Math.max(0, dueAt - Date.now());
+
+    if (dueAt > pacedPlaybackUntilRef.current) {
+      return;
+    }
+
+    pacedPlaybackTimerRef.current = window.setTimeout(() => {
+      pacedPlaybackTimerRef.current = null;
+
+      if (
+        !isPaceLocked ||
+        !audioBufferRef.current ||
+        analysisState !== "ready" ||
+        Date.now() >= pacedPlaybackUntilRef.current ||
+        currentBeatIndexRef.current >= playableSteps.length
+      ) {
+        return;
+      }
+
+      const queuedStepIndex = currentBeatIndexRef.current;
+
+      void performStepPlayback(
+        audioBufferRef.current,
+        playableSteps,
+        queuedStepIndex,
+        true,
+        (playedLabel) =>
+          `Played ${playedLabel} on step ${queuedStepIndex + 1} of ${playableSteps.length} at the song's pace.`,
+      ).finally(() => {
+        scheduleNextPacedStep();
+      });
+    }, delayMs);
+  };
+
 
   const playRewindCue = async (
     audioContext: AudioContext,
@@ -1750,8 +1904,18 @@ function App() {
   }, [decodedAudioBuffer]);
 
   useEffect(() => {
+    if (!isPaceLocked) {
+      clearPacedPlaybackTimer();
+      pacedPlaybackUntilRef.current = 0;
+    } else {
+      scheduleNextPacedStep();
+    }
+  }, [analysisState, isPaceLocked, playableSteps, playbackMode, typingFeel]);
+
+  useEffect(() => {
     return () => {
       clearIdleRelease();
+      clearPacedPlaybackTimer();
       if (uiPulseTimerRef.current !== null) {
         window.clearTimeout(uiPulseTimerRef.current);
       }
@@ -1832,6 +1996,8 @@ function App() {
           songStartTime: rewoundBeat,
           wallStartTime: Date.now(),
         };
+        clearPacedPlaybackTimer();
+        pacedPlaybackUntilRef.current = 0;
         lastPlayedStepIndexRef.current = null;
         pendingStepIndexRef.current = null;
 
@@ -1896,7 +2062,9 @@ function App() {
       pauseTransportPlayback();
       clearIdleRelease();
 
-      if (!canAcceptTriggerBurst()) {
+      const paceLockEnabled = isPaceLocked;
+
+      if (!paceLockEnabled && !canAcceptTriggerBurst()) {
         return;
       }
 
@@ -1933,10 +2101,8 @@ function App() {
         }
       }
 
-      const paceLockEnabled = isPaceLocked;
       let stepIndexToPlay = beatIndex;
       let startTime = stepPositions[beatIndex];
-      let shouldAdvanceStep = true;
 
       if (paceLockEnabled) {
         if (!performanceClockRef.current) {
@@ -1946,111 +2112,66 @@ function App() {
           };
         }
 
-        const elapsedSeconds =
-          (Date.now() - performanceClockRef.current.wallStartTime) / 1000;
-        const targetSongTime =
-          performanceClockRef.current.songStartTime + elapsedSeconds;
-
-        stepIndexToPlay = findPacedStepIndex(stepPositions, targetSongTime);
-
-        if (stepIndexToPlay < currentBeatIndexRef.current) {
-          stepIndexToPlay = Math.max(0, currentBeatIndexRef.current - 1);
-          shouldAdvanceStep = false;
+        if (currentBeatIndexRef.current >= stepPositions.length) {
+          setPerformanceStatus("Reached the end of the playable step map.");
+          return;
         }
 
-        startTime = stepPositions[stepIndexToPlay];
-      } else {
-        resetPerformanceClock();
+        const now = Date.now();
+        const isWindowActive = now < pacedPlaybackUntilRef.current;
+
+        if (!isWindowActive) {
+          performanceClockRef.current = {
+            songStartTime: stepPositions[currentBeatIndexRef.current],
+            wallStartTime: now,
+          };
+          pacedPlaybackUntilRef.current = now + typingFeelProfile.pacedWindowMs;
+          scheduleNextPacedStep();
+          setPerformanceStatus(
+            `Keeping song pace flowing from step ${currentBeatIndexRef.current + 1} for ${(
+              typingFeelProfile.pacedWindowMs / 1000
+            ).toFixed(1)} seconds.`,
+          );
+        } else {
+          setPerformanceStatus(
+            `Song pace is already flowing through step ${currentBeatIndexRef.current + 1}.`,
+          );
+        }
+
+        triggerUiPulse();
+        return;
       }
+
+      resetPerformanceClock();
 
       const isDuplicateStep =
         pendingStepIndexRef.current === stepIndexToPlay ||
         lastPlayedStepIndexRef.current === stepIndexToPlay;
 
-      if (paceLockEnabled && isDuplicateStep) {
+      if (isDuplicateStep) {
         setLastTriggeredBeat(startTime);
         triggerUiPulse();
         scheduleIdleRelease();
         setPerformanceStatus(
-          `Holding step ${stepIndexToPlay + 1} of ${stepPositions.length} at the song's pace.`,
+          `Holding step ${stepIndexToPlay + 1} of ${stepPositions.length} until the next trigger.`,
         );
         return;
       }
 
-      if (shouldAdvanceStep) {
-        currentBeatIndexRef.current = Math.max(
-          currentBeatIndexRef.current,
-          stepIndexToPlay + 1,
-        );
-        setPerformanceStep(currentBeatIndexRef.current);
-      }
+      currentBeatIndexRef.current = Math.max(
+        currentBeatIndexRef.current,
+        stepIndexToPlay + 1,
+      );
+      setPerformanceStep(currentBeatIndexRef.current);
 
-      pendingStepIndexRef.current = stepIndexToPlay;
-
-      void (async () => {
-        try {
-          const audioContext = await ensureAudioContext();
-
-          duckActiveVoices(
-            audioContext,
-            paceLockEnabled
-              ? Math.max(typingFeelProfile.duckReleaseTime, 0.2)
-              : typingFeelProfile.duckReleaseTime,
-          );
-          let playedLabel = "Song slice";
-
-          if (playbackMode === "piano") {
-            playedLabel = await playPianoStep(
-              audioContext,
-              audioBuffer,
-              startTime,
-              stepPositions,
-              stepIndexToPlay,
-              paceLockEnabled,
-            );
-          } else {
-            await playRawSliceStep(
-              audioContext,
-              audioBuffer,
-              startTime,
-              stepPositions,
-              stepIndexToPlay,
-              paceLockEnabled,
-            );
-          }
-
-          lastPlayedStepIndexRef.current = stepIndexToPlay;
-          if (pendingStepIndexRef.current === stepIndexToPlay) {
-            pendingStepIndexRef.current = null;
-          }
-          setLastTriggeredBeat(startTime);
-          setLastPianoNote(playedLabel);
-          triggerUiPulse();
-          setAudioError(null);
-          setPerformanceStatus(
-            shouldAdvanceStep
-              ? `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`
-              : `Held ${playedLabel} at step ${currentBeatIndexRef.current} until the song timeline advances.`,
-          );
-          scheduleIdleRelease();
-        } catch (error) {
-          if (pendingStepIndexRef.current === stepIndexToPlay) {
-            pendingStepIndexRef.current = null;
-          }
-          setPerformanceStatus(
-            playbackMode === "piano"
-              ? "Unable to play the piano interpretation."
-              : "Unable to play the song slice mode.",
-          );
-          setAudioError(
-            error instanceof Error
-              ? error.message
-              : playbackMode === "piano"
-                ? "Piano playback failed."
-                : "Song slice playback failed.",
-          );
-        }
-      })();
+      void performStepPlayback(
+        audioBuffer,
+        stepPositions,
+        stepIndexToPlay,
+        false,
+        (playedLabel) =>
+          `Played ${playedLabel} on step ${currentBeatIndexRef.current} of ${stepPositions.length}.`,
+      );
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2154,6 +2275,20 @@ function App() {
     }
   };
 
+  const handleDisableBackgroundTyping = async () => {
+    setBackgroundTypingState("idle");
+    setBackgroundTypingMessage("");
+
+    try {
+      await invoke("disable_background_typing");
+    } catch (error) {
+      setBackgroundTypingState("error");
+      setBackgroundTypingMessage(
+        error instanceof Error ? error.message : "Unable to disable background typing.",
+      );
+    }
+  };
+
   const handlePlay = async () => {
     const audioBuffer = audioBufferRef.current;
 
@@ -2193,8 +2328,6 @@ function App() {
 
   const beatPreview = analysisResult?.beatPositions.slice(0, 16) ?? [];
   const peakPreview = analysisResult?.energyPeaks.slice(0, 12) ?? [];
-  const typingFeelIndex = TYPING_FEELS.indexOf(typingFeel);
-  const mistakeModeIndex = MISTAKE_MODES.indexOf(mistakeMode);
   const boothCaption = isGameActive
     ? mistakeMode === "off"
       ? "The booth is live with mistakes ignored."
@@ -2408,57 +2541,48 @@ function App() {
               </div>
 
               <div className="feel-panel">
-                <label className="pace-label" htmlFor="typing-feel">
+                <label className="pace-label">
                   Typing feel
                 </label>
-                <div className="feel-slider-wrap">
-                  <input
-                    id="typing-feel"
-                    className="feel-slider"
-                    type="range"
-                    min="0"
-                    max="2"
-                    step="1"
-                    value={typingFeelIndex}
-                    aria-label="Typing feel"
-                    onChange={(event) => {
-                      const nextFeel = TYPING_FEELS[Number(event.currentTarget.value)] ?? "normal";
-                      setTypingFeel(nextFeel);
-                    }}
-                  />
-                </div>
-                <div className="feel-labels" aria-hidden="true">
-                  <span className={typingFeel === "slow" ? "feel-label-active" : ""}>Slow</span>
-                  <span className={typingFeel === "normal" ? "feel-label-active" : ""}>Normal</span>
-                  <span className={typingFeel === "high" ? "feel-label-active" : ""}>High</span>
+                <div className="feel-options" role="group" aria-label="Typing feel">
+                  {TYPING_FEELS.map((feel) => (
+                    <button
+                      key={feel}
+                      className={`feel-option-button ${
+                        typingFeel === feel ? "feel-option-button-active" : ""
+                      }`}
+                      type="button"
+                      onClick={() => setTypingFeel(feel)}
+                    >
+                      {feel === "slowest"
+                        ? "Slowest"
+                        : feel === "high"
+                          ? "High"
+                          : feel === "normal"
+                            ? "Normal"
+                            : "Slow"}
+                    </button>
+                  ))}
                 </div>
               </div>
 
               <div className="feel-panel">
-                <label className="pace-label" htmlFor="mistake-mode">
+                <label className="pace-label">
                   Mistake mode
                 </label>
-                <div className="feel-slider-wrap">
-                  <input
-                    id="mistake-mode"
-                    className="feel-slider"
-                    type="range"
-                    min="0"
-                    max="2"
-                    step="1"
-                    value={mistakeModeIndex}
-                    aria-label="Mistake mode"
-                    onChange={(event) => {
-                      const nextMode =
-                        MISTAKE_MODES[Number(event.currentTarget.value)] ?? "normal";
-                      setMistakeMode(nextMode);
-                    }}
-                  />
-                </div>
-                <div className="feel-labels" aria-hidden="true">
-                  <span className={mistakeMode === "off" ? "feel-label-active" : ""}>Off</span>
-                  <span className={mistakeMode === "normal" ? "feel-label-active" : ""}>Normal</span>
-                  <span className={mistakeMode === "strict" ? "feel-label-active" : ""}>Strict</span>
+                <div className="feel-options" role="group" aria-label="Mistake mode">
+                  {MISTAKE_MODES.map((mode) => (
+                    <button
+                      key={mode}
+                      className={`feel-option-button ${
+                        mistakeMode === mode ? "feel-option-button-active" : ""
+                      }`}
+                      type="button"
+                      onClick={() => setMistakeMode(mode)}
+                    >
+                      {mode === "off" ? "Off" : mode === "normal" ? "Normal" : "Strict"}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -2481,7 +2605,6 @@ function App() {
                     Lyrics mode (WIP)
                   </button>
                 </div>
-                <p className="prompt-caption">Lyrics mode is disabled for now while sync is rebuilt.</p>
               </div>
             </div>
 
@@ -2493,12 +2616,22 @@ function App() {
                     backgroundTypingState === "enabled" ? "background-button-active" : ""
                   }`}
                   type="button"
-                  onClick={() => void handleEnableBackgroundTyping()}
-                  disabled={backgroundTypingState === "enabled" || backgroundTypingState === "enabling"}
-                  aria-label="Enable background typing"
+                  onClick={() =>
+                    void (
+                      backgroundTypingState === "enabled"
+                        ? handleDisableBackgroundTyping()
+                        : handleEnableBackgroundTyping()
+                    )
+                  }
+                  disabled={backgroundTypingState === "enabling"}
+                  aria-label={
+                    backgroundTypingState === "enabled"
+                      ? "Disable background typing"
+                      : "Enable background typing"
+                  }
                 >
                   {backgroundTypingState === "enabled"
-                    ? "Background typing on"
+                    ? "Turn background typing off"
                     : backgroundTypingState === "enabling"
                       ? "Enabling..."
                       : "Enable background typing"}
@@ -2562,7 +2695,38 @@ function App() {
               <p className="panel-label">Rhythm analysis</p>
               <h2 className="panel-title">Pulse map</h2>
             </div>
+            <div className="panel-head-actions">
+              <button
+                className={`info-button ${isPulseInfoOpen ? "info-button-active" : ""}`}
+                type="button"
+                aria-expanded={isPulseInfoOpen}
+                aria-controls="pulse-map-info"
+                aria-label="Explain how Pulse map works"
+                onClick={() => setIsPulseInfoOpen((current) => !current)}
+              >
+                i
+              </button>
+            </div>
           </div>
+
+          {isPulseInfoOpen ? (
+            <div id="pulse-map-info" className="analysis-explainer">
+              <p className="analysis-card-label">How it works</p>
+              <p className="analysis-note">
+                Pulse Map scans the decoded audio in short frames, measures frame energy, then
+                finds local peaks that look like attacks or accents.
+              </p>
+              <p className="analysis-note">
+                It builds a histogram of time gaps between nearby peaks, normalizes those gaps into
+                a BPM range, and picks the strongest cluster as the estimated tempo.
+              </p>
+              <p className="analysis-note">
+                From that tempo it seeds a beat grid, snaps predicted beats toward nearby peaks,
+                then thins the result into a playable step map so the typing response lands on
+                stronger musical moments instead of every transient.
+              </p>
+            </div>
+          ) : null}
 
           <p className="analysis-summary">
             {analysisState === "idle" && "Load a song to analyze its tempo and beats."}
@@ -2595,9 +2759,6 @@ function App() {
                   </p>
                 </div>
               </div>
-              <p className="analysis-note">
-                Full beat timestamps are also logged in the dev console.
-              </p>
             </>
           ) : null}
         </section>
