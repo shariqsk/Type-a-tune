@@ -217,10 +217,72 @@ input:focus-visible {
   font-weight: 600;
 }
 
+.song-switcher {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.song-nav-button {
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(243, 201, 143, 0.22);
+  border-radius: 14px;
+  background: rgba(243, 201, 143, 0.08);
+  color: #f4cf9c;
+  font-size: 1.15rem;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease,
+    opacity 160ms ease;
+}
+
+.song-nav-button:hover:enabled {
+  transform: translateY(-1px);
+  background: rgba(243, 201, 143, 0.14);
+}
+
+.song-nav-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.song-switcher-status {
+  min-width: 0;
+  text-align: left;
+}
+
+.song-switcher-count {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+.song-switcher-name {
+  margin: 6px 0 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff6ea;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .browse-button:hover,
 .transport-button:hover:enabled,
 .prompt-button:hover:not(:disabled),
-.background-button:hover:not(:disabled) {
+.background-button:hover:not(:disabled),
+.song-nav-button:hover:enabled {
   transform: translateY(-1px);
 }
 
@@ -677,5 +739,18 @@ input:focus-visible {
 
   .dropzone-card {
     padding: 22px 18px;
+  }
+
+  .song-switcher {
+    grid-template-columns: 1fr;
+    text-align: center;
+  }
+
+  .song-switcher-status {
+    text-align: center;
+  }
+
+  .song-nav-button {
+    width: 100%;
   }
 }

@@ -5,11 +5,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
 type UploadedSong = {
+  id: string;
   name: string;
   path?: string;
   file?: File;
   url?: string;
   isDefault?: boolean;
+  addedAt?: number;
 };
 
 type AnalysisResult = {
@@ -56,16 +58,29 @@ type PerformanceClock = {
   wallStartTime: number;
 };
 
+type PersistedSong = {
+  id: string;
+  name: string;
+  path?: string;
+  url?: string;
+  isDefault?: boolean;
+  addedAt?: number;
+};
+
 const MIN_BPM = 70;
 const MAX_BPM = 170;
 const TYPING_FEELS: TypingFeel[] = ["slow", "normal", "high"];
 const MISTAKE_MODES: MistakeMode[] = ["off", "normal", "strict"];
 const INITIAL_PROMPT_WORD_COUNT = 96;
 const APPEND_PROMPT_WORD_COUNT = 48;
+const SONG_LIBRARY_STORAGE_KEY = "type-a-tune:song-library";
+const ACTIVE_SONG_STORAGE_KEY = "type-a-tune:active-song";
 const DEFAULT_SONG: UploadedSong = {
+  id: "builtin:piano-demo",
   name: "Built-in Piano Demo",
   url: "/demo-piano.wav",
   isDefault: true,
+  addedAt: 0,
 };
 const PROMPT_WORD_BANK = [
   "the",
@@ -162,6 +177,134 @@ const PROMPT_WORD_BANK = [
   "fall",
   "apart",
 ];
+
+const isPersistedSong = (value: unknown): value is PersistedSong => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+
+  if (typeof candidate.id !== "string" || typeof candidate.name !== "string") {
+    return false;
+  }
+
+  if (candidate.path !== undefined && typeof candidate.path !== "string") {
+    return false;
+  }
+
+  if (candidate.url !== undefined && typeof candidate.url !== "string") {
+    return false;
+  }
+
+  if (candidate.isDefault !== undefined && typeof candidate.isDefault !== "boolean") {
+    return false;
+  }
+
+  if (candidate.addedAt !== undefined && typeof candidate.addedAt !== "number") {
+    return false;
+  }
+
+  return true;
+};
+
+const buildSongLibrary = (songs: UploadedSong[]) => {
+  const uniqueSongs: UploadedSong[] = [];
+  const seenSongIds = new Set<string>();
+
+  for (const song of songs) {
+    if (seenSongIds.has(song.id)) {
+      continue;
+    }
+
+    seenSongIds.add(song.id);
+    uniqueSongs.push(song);
+  }
+
+  return uniqueSongs;
+};
+
+const readInitialSongState = () => {
+  const library = [DEFAULT_SONG];
+  let activeSongId = DEFAULT_SONG.id;
+
+  if (typeof window === "undefined") {
+    return {
+      library,
+      activeSongId,
+    };
+  }
+
+  try {
+    const rawLibrary = window.localStorage.getItem(SONG_LIBRARY_STORAGE_KEY);
+
+    if (rawLibrary) {
+      const parsedLibrary = JSON.parse(rawLibrary) as unknown;
+
+      if (Array.isArray(parsedLibrary)) {
+        const restoredSongs = parsedLibrary
+          .filter(isPersistedSong)
+          .map((song) => ({
+            ...song,
+          }));
+
+        const nextLibrary = buildSongLibrary([DEFAULT_SONG, ...restoredSongs]);
+
+        library.splice(0, library.length, ...nextLibrary);
+      }
+    }
+
+    const persistedActiveSongId = window.localStorage.getItem(ACTIVE_SONG_STORAGE_KEY);
+
+    if (persistedActiveSongId && library.some((song) => song.id === persistedActiveSongId)) {
+      activeSongId = persistedActiveSongId;
+    }
+  } catch {
+    return {
+      library: [DEFAULT_SONG],
+      activeSongId: DEFAULT_SONG.id,
+    };
+  }
+
+  return {
+    library,
+    activeSongId,
+  };
+};
+
+const upsertSong = (songs: UploadedSong[], song: UploadedSong) => {
+  const existingIndex = songs.findIndex((candidate) => candidate.id === song.id);
+
+  if (existingIndex === -1) {
+    return [...songs, song];
+  }
+
+  return songs.map((candidate, index) => (index === existingIndex ? song : candidate));
+};
+
+const createFileSong = (file: File): UploadedSong => {
+  return {
+    id: `file:${file.name}:${file.size}:${file.lastModified}`,
+    name: file.name,
+    file,
+    addedAt: Date.now(),
+  };
+};
+
+const createPathSong = (path: string): UploadedSong => {
+  const name = path.split(/[/\\]/).pop() ?? path;
+
+  return {
+    id: `path:${path}`,
+    name,
+    path,
+    addedAt: Date.now(),
+  };
+};
+
+const isSongPersistable = (song: UploadedSong) => {
+  return Boolean(song.isDefault || song.path || song.url);
+};
 
 const normalizeBpm = (value: number) => {
   let bpm = value;
@@ -528,6 +671,13 @@ const getTypedCharacterFromKey = (key: string) => {
 };
 
 function App() {
+  const initialSongStateRef = useRef<ReturnType<typeof readInitialSongState> | null>(null);
+
+  if (initialSongStateRef.current === null) {
+    initialSongStateRef.current = readInitialSongState();
+  }
+
+  const initialSongState = initialSongStateRef.current;
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -549,7 +699,8 @@ function App() {
     null,
   );
   const [isDragActive, setIsDragActive] = useState(false);
-  const [uploadedSong, setUploadedSong] = useState<UploadedSong | null>(DEFAULT_SONG);
+  const [savedSongs, setSavedSongs] = useState<UploadedSong[]>(initialSongState.library);
+  const [activeSongId, setActiveSongId] = useState(initialSongState.activeSongId);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [decodedAudioBuffer, setDecodedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
@@ -596,6 +747,56 @@ function App() {
   const promptWindowEnd = Math.min(activePrompt.length, promptCursor + 96);
   const visiblePrompt = activePrompt.slice(promptWindowStart, promptWindowEnd);
   const visibleCursorIndex = Math.max(0, promptCursor - promptWindowStart);
+  const activeSongIndex = savedSongs.findIndex((song) => song.id === activeSongId);
+  const uploadedSong =
+    savedSongs[activeSongIndex] ?? savedSongs[0] ?? null;
+  const canSelectPreviousSong = activeSongIndex > 0;
+  const canSelectNextSong =
+    activeSongIndex >= 0 && activeSongIndex < savedSongs.length - 1;
+
+  useEffect(() => {
+    if (savedSongs.length === 0) {
+      setSavedSongs([DEFAULT_SONG]);
+      setActiveSongId(DEFAULT_SONG.id);
+      return;
+    }
+
+    if (!savedSongs.some((song) => song.id === activeSongId)) {
+      setActiveSongId(savedSongs[0].id);
+    }
+  }, [activeSongId, savedSongs]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const persistedSongs = savedSongs
+      .filter(isSongPersistable)
+      .map(({ id, name, path, url, isDefault, addedAt }) => ({
+        id,
+        name,
+        path,
+        url,
+        isDefault,
+        addedAt,
+      }));
+
+    window.localStorage.setItem(SONG_LIBRARY_STORAGE_KEY, JSON.stringify(persistedSongs));
+  }, [savedSongs]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (uploadedSong) {
+      window.localStorage.setItem(ACTIVE_SONG_STORAGE_KEY, uploadedSong.id);
+      return;
+    }
+
+    window.localStorage.removeItem(ACTIVE_SONG_STORAGE_KEY);
+  }, [uploadedSong]);
 
   useEffect(() => {
     if (!isTypingBoothOpen) {
@@ -622,12 +823,29 @@ function App() {
   const isMp3File = (fileName: string) => fileName.toLowerCase().endsWith(".mp3");
 
   const handleSongSelection = (song: UploadedSong | null, error?: string) => {
-    setUploadedSong(song);
     setUploadError(error ?? null);
+
+    if (!song) {
+      return;
+    }
+
+    setSavedSongs((currentSongs) => upsertSong(currentSongs, song));
+    setActiveSongId(song.id);
   };
 
   const handleUploadError = (message: string) => {
     setUploadError(message);
+  };
+
+  const handleSavedSongStep = (direction: -1 | 1) => {
+    const nextSong = savedSongs[activeSongIndex + direction];
+
+    if (!nextSong) {
+      return;
+    }
+
+    setUploadError(null);
+    setActiveSongId(nextSong.id);
   };
 
   const resetPromptGame = () => {
@@ -1300,7 +1518,7 @@ function App() {
       return;
     }
 
-    handleSongSelection({ name: file.name, file });
+    handleSongSelection(createFileSong(file));
   };
 
   const isInsideDropzone = (x: number, y: number) => {
@@ -1357,8 +1575,7 @@ function App() {
           return;
         }
 
-        const name = mp3Path.split(/[/\\]/).pop() ?? mp3Path;
-        handleSongSelection({ name, path: mp3Path });
+        handleSongSelection(createPathSong(mp3Path));
       });
 
       if (disposed) {
@@ -2051,8 +2268,8 @@ function App() {
                 {uploadedSong
                   ? uploadedSong.isDefault
                     ? "The bundled piano demo is ready until you replace it."
-                    : "Your song is loaded into memory for this session."
-                  : "Your uploaded song stays in app memory for this session."}
+                    : "Imported songs stay in the deck so you can switch between them."
+                  : "Imported songs stay in the deck so you can switch between them."}
               </p>
 
               <button
@@ -2062,6 +2279,35 @@ function App() {
               >
                 Choose MP3
               </button>
+
+              <div className="song-switcher" aria-label="Saved songs">
+                <button
+                  className="song-nav-button"
+                  type="button"
+                  onClick={() => handleSavedSongStep(-1)}
+                  disabled={!canSelectPreviousSong}
+                  aria-label="Previous saved song"
+                >
+                  ←
+                </button>
+                <div className="song-switcher-status">
+                  <p className="song-switcher-count">
+                    Saved songs {savedSongs.length > 0 ? activeSongIndex + 1 : 0}/{savedSongs.length}
+                  </p>
+                  <p className="song-switcher-name">
+                    {uploadedSong?.name ?? "No saved songs yet"}
+                  </p>
+                </div>
+                <button
+                  className="song-nav-button"
+                  type="button"
+                  onClick={() => handleSavedSongStep(1)}
+                  disabled={!canSelectNextSong}
+                  aria-label="Next saved song"
+                >
+                  →
+                </button>
+              </div>
             </div>
 
             <div className="dropzone-status" aria-live="polite">
